@@ -13,7 +13,7 @@ from py_clob_client_v2.clob_types import OrderType
 from polybot.config import BotConfig
 from polybot.execution import LiveBroker, PaperBroker, _quantize_price
 from polybot.data.orderbook import Level, OrderBook
-from polybot.portfolio import Fill, Portfolio, Position
+from polybot.portfolio import Fill, Portfolio, Position, RestingOrder
 from polybot.strategies.base import Signal
 
 
@@ -460,6 +460,171 @@ def test_paperbroker_gescheiterte_gruppe_gibt_liquiditaet_und_cash_frei():
     assert broker.execute(signals, books, pf) == 1
     assert pf.positions["t1"].shares == pytest.approx(10)  # volle 10 fürs Solo-Signal
     assert pf.cash == pytest.approx(100.0 - 3.0)
+
+
+# ---- PaperBroker: ruhende Orders (Maker-Simulation) -------------------------
+
+def test_paperbroker_ruhende_order_fuellt_bei_preisdurchgang():
+    # Nicht-marketable BUY ruht; erst wenn der beste Ask auf/unter den
+    # Orderpreis fällt, füllt sie — zum ORDERpreis, als Maker (Gebühr 0).
+    broker = PaperBroker()
+    pf = Portfolio(cash=100.0)
+    book = OrderBook(token_id="tok", bids=[Level(0.40, 50)], asks=[Level(0.50, 50)])
+    sig = Signal(token_id="tok", side="BUY", price=0.45, size=10, reason="MM Bid")
+    assert broker.execute([sig], {"tok": book}, pf) == 0
+    assert len(pf.resting_orders) == 1
+    assert pf.reserved_cash == pytest.approx(4.5)
+    assert pf.cash == pytest.approx(100.0)  # reserviert, noch nicht abgebucht
+
+    # Kein Preisdurchgang -> kein Fill (Ask weiterhin über dem Orderpreis)
+    assert broker.execute([], {"tok": book}, pf) == 0
+    assert pf.positions == {}
+    assert len(pf.resting_orders) == 1
+
+    # Ask fällt unter den Orderpreis -> Maker-Fill zum Orderpreis, Gebühr 0
+    crossed = OrderBook(token_id="tok", bids=[Level(0.40, 50)], asks=[Level(0.44, 50)])
+    assert broker.execute([], {"tok": crossed}, pf, fee_rates={"tok": 0.07}) == 1
+    assert pf.positions["tok"].shares == pytest.approx(10)
+    assert pf.cash == pytest.approx(100.0 - 4.5)
+    assert pf.fills[-1].price == pytest.approx(0.45)
+    assert pf.fills[-1].fee == 0.0  # Maker zahlen keine Taker-Gebühr
+    assert pf.resting_orders == []
+    assert pf.reserved_cash == pytest.approx(0.0)
+
+
+def test_paperbroker_ruhende_sell_fuellt_bei_preisdurchgang():
+    broker = PaperBroker()
+    pf = Portfolio(cash=100.0)
+    pf.apply_fill(Fill(ts=time.time(), token_id="tok", side="BUY",
+                       price=0.50, size=10, reason=""))
+    # Ask-Quote 0.60 ist nicht marketable (bester Bid 0.50) -> ruht
+    book = OrderBook(token_id="tok", bids=[Level(0.50, 50)], asks=[Level(0.62, 50)])
+    sig = Signal(token_id="tok", side="SELL", price=0.60, size=10, reason="MM Ask")
+    assert broker.execute([sig], {"tok": book}, pf) == 0
+    assert len(pf.resting_orders) == 1
+    assert pf.positions["tok"].shares == pytest.approx(10)  # noch nichts verkauft
+
+    # Bid steigt über den Orderpreis -> Maker-Fill zum Orderpreis
+    crossed = OrderBook(token_id="tok", bids=[Level(0.61, 50)], asks=[Level(0.62, 50)])
+    assert broker.execute([], {"tok": crossed}, pf) == 1
+    assert pf.positions == {}
+    assert pf.cash == pytest.approx(100.0 - 5.0 + 6.0)
+    assert pf.fills[-1].price == pytest.approx(0.60)
+    assert pf.fills[-1].fee == 0.0
+
+
+def test_paperbroker_replace_ersetzt_ruhende_order():
+    # Neue replace-Quote ersetzt die alte ruhende Order desselben Tokens —
+    # Quotes dürfen sich nicht stapeln (Semantik wie LiveBroker-Cancel).
+    broker = PaperBroker()
+    pf = Portfolio(cash=100.0)
+    book = OrderBook(token_id="tok", bids=[Level(0.40, 50)], asks=[Level(0.50, 50)])
+    q1 = Signal(token_id="tok", side="BUY", price=0.45, size=10,
+                reason="MM Bid", replace=True)
+    broker.execute([q1], {"tok": book}, pf)
+    q2 = Signal(token_id="tok", side="BUY", price=0.44, size=10,
+                reason="MM Bid", replace=True)
+    broker.execute([q2], {"tok": book}, pf)
+    assert len(pf.resting_orders) == 1
+    assert pf.resting_orders[0].price == pytest.approx(0.44)
+    assert pf.reserved_cash == pytest.approx(4.4)  # alte Reservierung wieder frei
+
+
+def test_paperbroker_reserviertes_cash_deckt_keine_neuen_kaeufe():
+    # Das von einer ruhenden BUY reservierte Cash steht Sofort-Orders
+    # nicht zur Verfügung — sonst wäre der Maker-Fill später ungedeckt.
+    broker = PaperBroker()
+    pf = Portfolio(cash=10.0)
+    book_a = OrderBook(token_id="a", bids=[], asks=[Level(0.90, 100)])
+    quote = Signal(token_id="a", side="BUY", price=0.80, size=10, reason="MM Bid")
+    broker.execute([quote], {"a": book_a}, pf)
+    assert pf.reserved_cash == pytest.approx(8.0)
+
+    book_b = OrderBook(token_id="b", bids=[], asks=[Level(0.50, 100)])
+    buy = Signal(token_id="b", side="BUY", price=0.50, size=100, reason="test")
+    broker.execute([buy], {"a": book_a, "b": book_b}, pf)
+    assert pf.positions["b"].shares == pytest.approx(4.0)  # nur 2 USDC frei, nicht 10
+    assert pf.cash - pf.reserved_cash == pytest.approx(0.0)
+
+    # Der spätere Maker-Fill der ruhenden Order ist voll gedeckt
+    crossed = OrderBook(token_id="a", bids=[], asks=[Level(0.75, 100)])
+    assert broker.execute([], {"a": crossed}, pf) == 1
+    assert pf.positions["a"].shares == pytest.approx(10)
+    assert pf.cash == pytest.approx(0.0)
+
+
+def test_paperbroker_ruhende_buy_wird_am_cash_gekappt():
+    # Ohne Deckung keine Reservierung: nur der bezahlbare Teil ruht.
+    broker = PaperBroker()
+    pf = Portfolio(cash=4.0)
+    book = OrderBook(token_id="tok", bids=[], asks=[Level(0.90, 100)])
+    sig = Signal(token_id="tok", side="BUY", price=0.80, size=10, reason="MM Bid")
+    broker.execute([sig], {"tok": book}, pf)
+    assert pf.resting_orders[0].size == pytest.approx(5.0)  # 4 USDC / 0.80
+    assert pf.reserved_cash == pytest.approx(4.0)
+
+
+def test_paperbroker_rebate_wird_gutgeschrieben():
+    # Konfigurierte Rebate-Rate wird auf Maker-Fills gutgeschrieben und
+    # als rebates_earned ausgewiesen (Default 0.0 = aus).
+    cfg = BotConfig()
+    cfg.risk.taker_fee_rate = 0.0
+    cfg.strategy.maker_rebate_rate = 0.01
+    broker = PaperBroker(cfg)
+    pf = Portfolio(cash=100.0)
+    book = OrderBook(token_id="tok", bids=[], asks=[Level(0.60, 50)])
+    sig = Signal(token_id="tok", side="BUY", price=0.50, size=10, reason="MM Bid")
+    assert broker.execute([sig], {"tok": book}, pf) == 0
+
+    crossed = OrderBook(token_id="tok", bids=[], asks=[Level(0.50, 50)])
+    assert broker.execute([], {"tok": crossed}, pf) == 1
+    rebate = 10 * 0.01 * 0.50 * (1 - 0.50)  # rate * p * (1-p) pro Share
+    assert pf.rebates_earned == pytest.approx(rebate)
+    assert pf.cash == pytest.approx(100.0 - 5.0 + rebate)
+    assert pf.realized_pnl == pytest.approx(rebate)
+
+
+def test_paperbroker_ohne_rebate_rate_keine_gutschrift():
+    # Default 0.0: konservativ kein simulierter Rebate-Verdienst.
+    broker = PaperBroker()
+    pf = Portfolio(cash=100.0)
+    book = OrderBook(token_id="tok", bids=[], asks=[Level(0.60, 50)])
+    broker.execute([Signal(token_id="tok", side="BUY", price=0.50, size=10,
+                           reason="MM Bid")], {"tok": book}, pf)
+    crossed = OrderBook(token_id="tok", bids=[], asks=[Level(0.50, 50)])
+    broker.execute([], {"tok": crossed}, pf)
+    assert pf.rebates_earned == 0.0
+    assert pf.cash == pytest.approx(100.0 - 5.0)
+
+
+def test_paperbroker_ruhende_teilfuellung_bleibt_ruhen():
+    # Reicht die Gegenliquidität nicht, füllt nur ein Teil — der Rest ruht.
+    broker = PaperBroker()
+    pf = Portfolio(cash=100.0)
+    book = OrderBook(token_id="tok", bids=[], asks=[Level(0.60, 50)])
+    broker.execute([Signal(token_id="tok", side="BUY", price=0.50, size=10,
+                           reason="MM Bid")], {"tok": book}, pf)
+    crossed = OrderBook(token_id="tok", bids=[], asks=[Level(0.48, 4)])
+    assert broker.execute([], {"tok": crossed}, pf) == 1
+    assert pf.positions["tok"].shares == pytest.approx(4)
+    assert pf.resting_orders[0].size == pytest.approx(6)
+    assert pf.reserved_cash == pytest.approx(6 * 0.50)
+
+
+def test_ruhende_orders_und_rebates_ueberleben_neustart(tmp_path):
+    # Ruhende Orders und Rebates sind Teil des persistierten Paper-States.
+    pf = Portfolio(cash=100.0)
+    pf.resting_orders.append(RestingOrder(
+        ts=1.0, token_id="tok", side="BUY", price=0.45, size=10,
+        reason="MM Bid", market_question="Frage?"))
+    pf.rebates_earned = 1.23
+    path = tmp_path / "state.json"
+    pf.save(path)
+    loaded = Portfolio.load(path)
+    assert loaded.rebates_earned == pytest.approx(1.23)
+    assert len(loaded.resting_orders) == 1
+    assert loaded.resting_orders[0].price == pytest.approx(0.45)
+    assert loaded.reserved_cash == pytest.approx(4.5)
 
 
 def test_paperbroker_fallback_fee_rate_aus_config():

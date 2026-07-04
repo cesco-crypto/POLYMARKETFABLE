@@ -41,12 +41,34 @@ class Fill:
 
 
 @dataclass
+class RestingOrder:
+    """Ruhende (nicht-marketable) Paper-Order — Simulation einer GTC-Quote.
+
+    Wird vom PaperBroker gegen jeden neuen Book-Snapshot geprüft und füllt
+    konservativ erst, wenn der Markt den Orderpreis durchschreitet
+    (Fill als Maker zum Orderpreis, Gebühr 0).
+    """
+
+    ts: float
+    token_id: str
+    side: str                 # "BUY" | "SELL"
+    price: float
+    size: float               # noch offene Shares
+    reason: str
+    market_question: str = ""
+
+
+@dataclass
 class Portfolio:
     cash: float = 1000.0  # Start-Cash im Paper-Modus (USDC)
     positions: dict[str, Position] = field(default_factory=dict)
     fills: list[Fill] = field(default_factory=list)
     realized_pnl: float = 0.0
     fees_paid: float = 0.0  # kumulierte Taker-Gebühren in USDC (bereits im Cash abgezogen)
+    rebates_earned: float = 0.0  # kumulierte Maker-Rebates in USDC (bereits im Cash enthalten)
+    # Ruhende Paper-Orders (GTC-Quotes) — persistiert, damit sie einen
+    # Neustart überleben; das Cash ruhender BUYs gilt als reserviert.
+    resting_orders: list[RestingOrder] = field(default_factory=list)
     day_start_date: str = field(default_factory=_utc_today)  # UTC-Kalendertag
     # None = "beim Start setzen": wird in __post_init__ an den tatsächlichen
     # Startwert gekoppelt, damit Portfolio(cash=X) nicht sofort PnL zeigt.
@@ -65,6 +87,24 @@ class Portfolio:
 
     def total_exposure(self) -> float:
         return sum(p.cost_basis for p in self.positions.values())
+
+    @property
+    def reserved_cash(self) -> float:
+        """Durch ruhende BUY-Orders gebundenes Cash (Orderpreis * Restgröße).
+
+        Maker zahlen keine Gebühr — reserviert wird genau der Kaufpreis.
+        Das Cash bleibt in self.cash (Fills buchen normal dagegen), steht
+        aber neuen Sofort-Orders nicht mehr zur Verfügung.
+        """
+        return sum(o.price * o.size for o in self.resting_orders if o.side == "BUY")
+
+    def credit_rebate(self, amount: float) -> None:
+        """Maker-Rebate gutschreiben: Cash, realisierter PnL und Ausweis."""
+        if amount <= 0:
+            return
+        self.cash += amount
+        self.realized_pnl += amount
+        self.rebates_earned += amount
 
     def apply_fill(self, fill: Fill) -> None:
         pos = self.positions.setdefault(fill.token_id, Position(token_id=fill.token_id))
@@ -207,10 +247,12 @@ class Portfolio:
             "cash": self.cash,
             "realized_pnl": self.realized_pnl,
             "fees_paid": self.fees_paid,
+            "rebates_earned": self.rebates_earned,
             "day_start_date": self.day_start_date,
             "day_start_value": self.day_start_value,
             "positions": {k: asdict(v) for k, v in self.positions.items()},
             "fills": [asdict(f) for f in self.fills],
+            "resting_orders": [asdict(o) for o in self.resting_orders],
         }
         # Atomar schreiben: erst in Temp-Datei, dann os.replace — ein Crash
         # mitten im Schreiben darf den State nicht zerstören.
@@ -236,10 +278,12 @@ class Portfolio:
             cash=data["cash"],
             realized_pnl=data.get("realized_pnl", 0.0),
             fees_paid=data.get("fees_paid", 0.0),  # alte States: 0.0
+            rebates_earned=data.get("rebates_earned", 0.0),  # alte States: 0.0
             day_start_date=day_start_date,
             day_start_value=data.get("day_start_value", start_cash),
         )
         pf.positions = {k: Position(**v) for k, v in data.get("positions", {}).items()}
         pf.fills = [Fill(**f) for f in data.get("fills", [])]
+        pf.resting_orders = [RestingOrder(**o) for o in data.get("resting_orders", [])]
         pf._fills_flushed = len(pf.fills)  # geladene Fills stehen schon auf Disk
         return pf

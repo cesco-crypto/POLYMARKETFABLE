@@ -9,7 +9,11 @@ zuerst im Paper-Modus beobachten.
 
 Order-Lifecycle: Die Quotes tragen replace=True — der LiveBroker cancelt
 vor dem Neu-Quoten die zuvor platzierten Orders desselben Tokens, damit
-sich keine veralteten GTC-Quotes im Buch stapeln.
+sich keine veralteten GTC-Quotes im Buch stapeln. Der PaperBroker bildet
+dieselbe Semantik mit ruhenden Orders nach: nicht-marketable Quotes ruhen
+im Portfolio-State und füllen erst bei Preisdurchgang als Maker (Gebühr 0,
+optional Rebate über strategy.maker_rebate_rate); ein neues replace-Signal
+ersetzt die alte ruhende Order desselben Tokens.
 """
 
 from __future__ import annotations
@@ -42,6 +46,13 @@ class MarketMaking(Strategy):
 
             bid_px = round(mid - s.mm_spread, 3)
             ask_px = round(mid + s.mm_spread, 3)
+            # Nicht-marketable Quotes sind Pflicht: wir verdienen als Maker
+            # (Gebühr 0 + Rebate) — eine Quote, die die Gegenseite kreuzt,
+            # würde als Taker füllen und Gebühren zahlen. Durch die
+            # Spread-Bedingung oben mathematisch garantiert; defensiv gegen
+            # Rundungs-/Randfälle trotzdem prüfen.
+            if bid_px >= book.best_ask.price or ask_px <= book.best_bid.price:
+                continue
             size = s.mm_size_usdc / max(mid, 0.05)
 
             pf = snap.portfolio

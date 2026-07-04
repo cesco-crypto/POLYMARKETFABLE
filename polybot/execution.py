@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 from polybot.config import CLOB_HOST, POLYGON_CHAIN_ID, BotConfig
 from polybot.data.orderbook import OrderBook
-from polybot.portfolio import Fill, Portfolio
+from polybot.portfolio import Fill, Portfolio, RestingOrder
 from polybot.strategies.base import Signal
 
 log = logging.getLogger(__name__)
@@ -76,12 +76,25 @@ class PaperBroker(Broker):
     Signalgruppen (s.group, Arb-Beine) füllen FOK-atomar: nur wenn JEDES Bein
     in voller Signalgröße füllbar ist, wird die Gruppe gebucht — sonst füllt
     kein Bein (ein halber Arb wäre eine offene, ungehedgte Wette).
+
+    Ruhende Orders (GTC-Simulation): der nicht-marketable Rest ungruppierter
+    Signale ruht als RestingOrder im Portfolio-State (überlebt Neustarts).
+    Zu Beginn jedes execute() werden ruhende Orders gegen das AKTUELLE Buch
+    geprüft: eine ruhende BUY füllt konservativ erst, wenn der beste Ask auf
+    oder unter den Orderpreis gefallen ist (analog SELL gegen den Bid) —
+    Fill zum Orderpreis als Maker (Gebühr 0, optional Rebate-Gutschrift).
+    Das Cash ruhender BUYs ist reserviert und steht Sofort-Orders nicht zur
+    Verfügung; ein replace-Signal ersetzt die alten Quotes seines Tokens
+    (gleiche Semantik wie das Cancel-vor-Neuquote des LiveBrokers).
     """
 
     def __init__(self, cfg: BotConfig | None = None):
         # Fallback-Rate für Tokens ohne abrufbare Fee-Rate (konservativ das
         # konfigurierte Maximum); ohne Config (Tests) gebührenfrei.
         self.fallback_fee_rate = cfg.risk.taker_fee_rate if cfg else 0.0
+        # Rebate-Simulation für Maker-Fills: rebate = rate * p * (1-p) pro
+        # Share (analog zur Taker-Formel). Default 0.0 = aus (konservativ).
+        self.maker_rebate_rate = cfg.strategy.maker_rebate_rate if cfg else 0.0
 
     def _walk_levels(self, s: Signal, levels, max_size: float, skip: float,
                      cash_left: float, rate: float) -> tuple[float, float, float]:
@@ -120,16 +133,107 @@ class PaperBroker(Broker):
             remaining -= take
         return filled, cost, fee
 
+    # ---- Ruhende Orders (Maker-Simulation) ---------------------------------
+
+    def _match_resting(self, books: dict[str, OrderBook], portfolio: Portfolio,
+                       consumed: dict[tuple[str, str], float]) -> int:
+        """Ruhende Orders gegen den aktuellen Book-Snapshot prüfen und füllen.
+
+        Konservativ: eine ruhende BUY füllt erst, wenn der beste Ask auf oder
+        unter den Orderpreis gefallen ist (der Markt hat unsere Quote
+        durchschritten) — analog SELL gegen den besten Bid. Gefüllt wird zum
+        ORDERpreis als Maker (Gebühr 0), höchstens die bis zum Orderpreis
+        vorhandene Gegenliquidität; der Rest bleibt ruhen. BUY-Fills sind
+        durch die Cash-Reservierung gedeckt, SELLs werden am Bestand gekappt.
+        """
+        fills = 0
+        still_resting: list[RestingOrder] = []
+        for o in portfolio.resting_orders:
+            book = books.get(o.token_id)
+            if not book:
+                still_resting.append(o)
+                continue
+            if o.side == "BUY":
+                avail = sum(lv.size for lv in book.asks if lv.price <= o.price + 1e-9)
+            else:
+                avail = sum(lv.size for lv in book.bids if lv.price >= o.price - 1e-9)
+            take = min(o.size, avail)
+            if o.side == "SELL":
+                pos = portfolio.positions.get(o.token_id)
+                take = min(take, pos.shares if pos else 0.0)
+            if take <= 1e-9:
+                still_resting.append(o)
+                continue
+            fill = Fill(ts=time.time(), token_id=o.token_id, side=o.side,
+                        price=o.price, size=take, reason=o.reason, fee=0.0)
+            portfolio.apply_fill(fill)
+            # Offizieller Maker-Verdienstkanal: Rebate-Anteil der Taker-Fees.
+            portfolio.credit_rebate(take * self.maker_rebate_rate
+                                    * o.price * (1.0 - o.price))
+            consumed[(o.token_id, o.side)] = consumed.get((o.token_id, o.side), 0.0) + take
+            fills += 1
+            log.info("Paper-Maker-Fill: %s %.0f Shares @%.3f (Gebühr 0) — %s (%s)",
+                     o.side, take, o.price, o.market_question[:50], o.reason)
+            o.size -= take
+            if o.size > 1e-9:
+                still_resting.append(o)
+        portfolio.resting_orders = still_resting
+        return fills
+
+    @staticmethod
+    def _cancel_resting(portfolio: Portfolio, token_id: str) -> float:
+        """Alle ruhenden Orders eines Tokens entfernen (replace-Semantik).
+
+        Rückgabe: freigewordene Cash-Reservierung der entfernten BUYs.
+        """
+        freed = sum(o.price * o.size for o in portfolio.resting_orders
+                    if o.token_id == token_id and o.side == "BUY")
+        portfolio.resting_orders = [o for o in portfolio.resting_orders
+                                    if o.token_id != token_id]
+        return freed
+
+    def _rest_remainder(self, s: Signal, filled: float, portfolio: Portfolio,
+                        cash_left: float) -> float:
+        """Ungefüllten Rest eines ungruppierten Signals als GTC ruhen lassen.
+
+        Rückgabe: dafür reserviertes Cash (BUY: Orderpreis * Restgröße).
+        Deckung wie bei Sofort-Fills: BUYs am verfügbaren Cash gekappt,
+        SELLs am noch nicht durch andere ruhende SELLs gebundenen Bestand.
+        """
+        rest = s.size - filled
+        if rest <= 1e-9 or not 0.0 < s.price < 1.0:
+            return 0.0
+        if s.side == "BUY":
+            rest = min(rest, max(cash_left, 0.0) / s.price)
+        else:
+            pos = portfolio.positions.get(s.token_id)
+            bound = sum(o.size for o in portfolio.resting_orders
+                        if o.token_id == s.token_id and o.side == "SELL")
+            rest = min(rest, (pos.shares if pos else 0.0) - bound)
+        if rest <= 1e-9:
+            return 0.0
+        portfolio.resting_orders.append(RestingOrder(
+            ts=time.time(), token_id=s.token_id, side=s.side, price=s.price,
+            size=rest, reason=s.reason, market_question=s.market_question))
+        log.info("Paper: Order ruht im Buch: %s %.0f @%.3f — %s (%s)",
+                 s.side, rest, s.price, s.market_question[:50], s.reason)
+        return rest * s.price if s.side == "BUY" else 0.0
+
+    # ---- Ausführung --------------------------------------------------------
+
     def execute(self, signals: list[Signal], books: dict[str, OrderBook], portfolio: Portfolio,
                 fee_rates: dict[str, float] | None = None) -> int:
         fee_rates = fee_rates or {}
-        fills = 0
         # Innerhalb dieses Aufrufs bereits konsumierte Buchliquidität je
         # (Token, Seite): spätere Signale sehen nur noch die Restliquidität.
         consumed: dict[tuple[str, str], float] = {}
+        # Zuerst ruhende Orders gegen das aktuelle Buch prüfen (Maker-Fills);
+        # die dabei konsumierte Liquidität sehen neue Signale nicht mehr.
+        fills = self._match_resting(books, portfolio, consumed)
         # Laufendes Cash über alle geplanten Fills dieses Aufrufs. Konservativ:
-        # Erlöse noch nicht gebuchter Gruppen-SELLs zählen nicht als verfügbar.
-        cash_left = portfolio.cash
+        # Erlöse noch nicht gebuchter Gruppen-SELLs zählen nicht als verfügbar;
+        # das von ruhenden BUYs reservierte Cash ist nicht verfügbar.
+        cash_left = portfolio.cash - portfolio.reserved_cash
         # Von noch nicht gebuchten Gruppen-SELLs reservierte Shares je Token.
         reserved: dict[str, float] = {}
         # Geplante Beine je Gruppe (gebucht erst, wenn alle Beine voll füllbar
@@ -152,7 +256,16 @@ class PaperBroker(Broker):
                         "füllbar, kein Bein wird gefüllt (FOK)", group)
             return freed_cash
 
+        # Tokens, deren Alt-Quotes in diesem Aufruf schon ersetzt wurden.
+        refreshed: set[str] = set()
+
         for s in signals:
+            if s.replace and s.token_id not in refreshed:
+                # Replace-Semantik wie im LiveBroker (Cancel vor Neuquote):
+                # die neue Quote ersetzt die alten ruhenden Orders des Tokens,
+                # deren Cash-Reservierung wird wieder frei.
+                cash_left += self._cancel_resting(portfolio, s.token_id)
+                refreshed.add(s.token_id)
             if s.group and s.group in failed_groups:
                 continue
             book = books.get(s.token_id)
@@ -178,29 +291,34 @@ class PaperBroker(Broker):
                 # FOK: Bein nicht in voller Größe füllbar -> ganze Gruppe weg.
                 cash_left += fail_group(s.group)
                 continue
-            if filled <= 1e-9:
-                log.debug("Paper: kein Fill für %s %s @%.3f", s.side, s.token_id[:12], s.price)
-                continue
-            consumed[(s.token_id, s.side)] = skip + filled
-            cash_used = cost + fee if s.side == "BUY" else 0.0
-            cash_left -= cash_used
-            if s.side == "SELL" and not s.group:
-                # Erlöse sofort gebuchter SELLs stehen Folgekäufen zur Verfügung.
-                cash_left += cost - fee
-            fill = Fill(ts=time.time(), token_id=s.token_id, side=s.side,
-                        price=cost / filled, size=filled, reason=s.reason, fee=fee)
-            if s.group:
-                res = filled if s.side == "SELL" else 0.0
-                if res > 0:
-                    reserved[s.token_id] = reserved.get(s.token_id, 0.0) + res
-                group_plans.setdefault(s.group, []).append(fill)
-                group_state.setdefault(s.group, []).append(
-                    (s.token_id, s.side, filled, cash_used, res))
+            if filled > 1e-9:
+                consumed[(s.token_id, s.side)] = skip + filled
+                cash_used = cost + fee if s.side == "BUY" else 0.0
+                cash_left -= cash_used
+                if s.side == "SELL" and not s.group:
+                    # Erlöse sofort gebuchter SELLs stehen Folgekäufen zur Verfügung.
+                    cash_left += cost - fee
+                fill = Fill(ts=time.time(), token_id=s.token_id, side=s.side,
+                            price=cost / filled, size=filled, reason=s.reason, fee=fee)
+                if s.group:
+                    res = filled if s.side == "SELL" else 0.0
+                    if res > 0:
+                        reserved[s.token_id] = reserved.get(s.token_id, 0.0) + res
+                    group_plans.setdefault(s.group, []).append(fill)
+                    group_state.setdefault(s.group, []).append(
+                        (s.token_id, s.side, filled, cash_used, res))
+                else:
+                    portfolio.apply_fill(fill)
+                    fills += 1
+                    log.info("Paper-Fill: %s %.0f Shares @%.3f (VWAP) — %s (%s)",
+                             s.side, filled, fill.price, s.market_question[:50], s.reason)
             else:
-                portfolio.apply_fill(fill)
-                fills += 1
-                log.info("Paper-Fill: %s %.0f Shares @%.3f (VWAP) — %s (%s)",
-                         s.side, filled, fill.price, s.market_question[:50], s.reason)
+                log.debug("Paper: kein Sofort-Fill für %s %s @%.3f",
+                          s.side, s.token_id[:12], s.price)
+            if not s.group:
+                # GTC-Semantik: der nicht-marketable Rest ruht als Quote im
+                # Buch und füllt später als Maker (siehe _match_resting).
+                cash_left -= self._rest_remainder(s, filled, portfolio, cash_left)
         # Vollständig füllbare Gruppen jetzt atomar buchen (FOK erfüllt).
         for group, plan in group_plans.items():
             for fill in plan:

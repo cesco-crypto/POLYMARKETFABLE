@@ -125,6 +125,61 @@ def test_active_markets_dedupliziert_bei_seitenueberlappung():
     assert len(ids) == len(set(ids)) == 101
 
 
+def _liq_row(i: int, liquidity: float) -> dict:
+    row = gamma_market_row(i)
+    row["negRisk"] = False
+    row["liquidityNum"] = liquidity
+    return row
+
+
+def make_windowed_get(rows: list[dict], calls: list[dict]):
+    """Simuliert das Live-Verhalten von /markets: max. 100 Zeilen pro Request,
+    Offset-Deckel bei 2000, serverseitige liquidity_num_min/max-Filter."""
+
+    def fake_get(path, **params):
+        calls.append(dict(params))
+        assert params["offset"] <= 2000, "Offset über Server-Deckel -> live HTTP 422"
+        subset = [r for r in rows
+                  if r["liquidityNum"] >= params.get("liquidity_num_min", 0.0)
+                  and r["liquidityNum"] <= params.get("liquidity_num_max", float("inf"))]
+        subset.sort(key=lambda r: -r["liquidityNum"])
+        off = params["offset"]
+        return subset[off: off + min(params["limit"], 100)]
+
+    return fake_get
+
+
+def test_all_active_markets_paginiert_ueber_den_offset_deckel():
+    # Regressionstest: /markets lehnt Offsets über ~2000 mit HTTP 422 ab und
+    # /markets/keyset ignoriert seinen Cursor — mehr als 2100 Märkte sind nur
+    # über das Liquiditätsfenster (liquidity_num_max) erreichbar.
+    rows = [_liq_row(i, 10_000.0 - i) for i in range(2_300)]
+    calls: list[dict] = []
+    gc = GammaClient()
+    gc._get = make_windowed_get(rows, calls)  # noqa: SLF001 — Test-Stub
+    out = gc.all_active_markets(min_liquidity=1.0, min_volume=500.0)
+    ids = {m.condition_id for m in out}
+    assert len(out) == len(ids) == 2_300  # vollständig UND dedupliziert
+    assert all(c["offset"] <= 2000 for c in calls)
+    # Das zweite Fenster beginnt bei der kleinsten Liquidität des ersten:
+    assert any("liquidity_num_max" in c and c["offset"] == 0 for c in calls)
+    # Serverseitige Filter (Volumen = sichere Obermenge des 24h-Filters):
+    assert all(c["liquidity_num_min"] == 1.0 and c["volume_num_min"] == 500.0
+               for c in calls)
+
+
+def test_all_active_markets_bricht_bei_stagnierendem_fenster_ab():
+    # Über 2100 Märkte mit IDENTISCHER Liquidität: das Fenster kann nicht
+    # weiterrücken — Abbruch mit Teilergebnis statt Endlosschleife.
+    rows = [_liq_row(i, 5_000.0) for i in range(2_200)]
+    calls: list[dict] = []
+    gc = GammaClient()
+    gc._get = make_windowed_get(rows, calls)  # noqa: SLF001 — Test-Stub
+    out = gc.all_active_markets()
+    assert len(out) == 2_100  # ein voller Offset-Durchlauf (21 Seiten à 100)
+    assert len(calls) <= 42  # zwei Fenster-Durchläufe, dann Stopp
+
+
 # ---- Fee-Rate-Parsing (Quelle: feesEnabled + feeSchedule.rate) -------------
 
 def test_parse_market_liest_fee_rate_aus_fee_schedule():

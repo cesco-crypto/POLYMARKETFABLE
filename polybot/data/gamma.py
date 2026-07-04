@@ -142,6 +142,77 @@ class GammaClient:
             offset += page
         return list(out.values())
 
+    # Live-Befund (Juli 2026): /markets liefert höchstens 100 Zeilen pro
+    # Request (limit=500 wird stillschweigend auf 100 gekappt) und lehnt
+    # Offsets über ~2000 mit HTTP 422 ab ("use /markets/keyset"). Der
+    # /markets/keyset-Endpunkt ignoriert seinen eigenen next_cursor aber in
+    # jeder getesteten Parameter-Schreibweise (Seiten wiederholen sich) und
+    # ist damit unbrauchbar. Deshalb Fenster-Pagination über die Liquidität.
+    _OFFSET_CAP = 2000
+
+    def all_active_markets(self, min_liquidity: float = 0.0,
+                           min_volume: float = 0.0) -> list[Market]:
+        """ALLE aktiven Märkte mit Mindestliquidität — Fenster-Pagination.
+
+        Statt Offset-Pagination (Server-Deckel bei ~2000, s.o.) wird nach
+        Liquidität absteigend sortiert und das Fenster über liquidity_num_max
+        weitergeschoben: Ist der Offset-Deckel eines Fensters erreicht, geht
+        es mit liquidity_num_max = kleinste gesehene Liquidität weiter.
+        Grenz-Duplikate (gleiche Liquidität in zwei Fenstern) fängt die
+        Deduplizierung nach condition_id ab; kommt ein Fenster nicht voran
+        (>2000 Märkte mit identischer Liquidität), wird mit Warnung
+        abgebrochen statt endlos zu schleifen.
+
+        min_volume filtert serverseitig über volume_num_min (GESAMT-Volumen).
+        Weil Gesamtvolumen >= 24h-Volumen ist das eine sichere Obermenge des
+        24h-Filters des Aufrufers — es fällt nie ein Markt weg, der den
+        24h-Filter bestanden hätte, aber der Scan schrumpft deutlich
+        (live gemessen: ~9.5k statt ~16k Märkte bei 2k Mindestliquidität).
+        Rate-Limit-Budget: ~100 sequenzielle /markets-Calls über ~30s —
+        deutlich unter den ~300 Calls/10s der Gamma-API.
+        """
+        out: dict[str, Market] = {}
+        page = 100  # Server-Maximum pro Request (s.o.)
+        liq_max: float | None = None
+        while True:
+            offset = 0
+            window_min: float | None = None
+            exhausted = False
+            while offset <= self._OFFSET_CAP:
+                params = dict(
+                    active="true", closed="false", order="liquidityNum",
+                    ascending="false", limit=page, offset=offset,
+                )
+                if min_liquidity > 0:
+                    params["liquidity_num_min"] = min_liquidity
+                if min_volume > 0:
+                    params["volume_num_min"] = min_volume
+                if liq_max is not None:
+                    params["liquidity_num_max"] = liq_max
+                rows = self._get("/markets", **params)
+                for row in rows:
+                    m = _parse_market(row)
+                    if m and not m.closed and m.liquidity >= min_liquidity:
+                        out.setdefault(m.condition_id, m)
+                    if m is not None:
+                        window_min = (m.liquidity if window_min is None
+                                      else min(window_min, m.liquidity))
+                if len(rows) < page:
+                    exhausted = True
+                    break
+                offset += page
+            if exhausted or window_min is None:
+                break
+            if liq_max is not None and window_min >= liq_max:
+                log.warning(
+                    "Vollmarkt-Scan: Liquiditätsfenster kommt bei %.2f nicht "
+                    "voran — Abbruch mit %d Märkten als Teilergebnis",
+                    liq_max, len(out),
+                )
+                break
+            liq_max = window_min
+        return list(out.values())
+
     def negrisk_events(self, min_liquidity: float = 0.0, limit: int = 200) -> dict[str, list[Market]]:
         """Multi-Outcome-Events (negRisk): Event-Slug -> Liste der Teilmärkte.
 

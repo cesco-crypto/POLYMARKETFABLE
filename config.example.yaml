@@ -5,6 +5,7 @@ mode: paper            # "paper" (Simulation) oder "live" (echtes Geld!)
 poll_interval_s: 10
 
 risk:
+  paper_start_cash: 1000      # Start-Cash beim ERSTEN Anlegen des Paper-Portfolios
   max_order_usdc: 50          # max. Größe einer einzelnen Order
   max_position_usdc: 200      # max. Exposure pro Markt
   max_total_exposure_usdc: 500
@@ -19,8 +20,19 @@ strategy:
   mm_spread: 0.02
   mm_size_usdc: 25
   mm_max_inventory_usdc: 100
+  maker_rebate_rate: 0.0      # Rebate-Simulation auf Maker-Fills (Paper):
+                              # rebate = rate * p * (1-p) pro Share; Polymarket
+                              # zahlt Makern 20-25% der Taker-Fees, realistisch
+                              # also <= 0.0175. 0.0 = aus (konservativ)
   min_liquidity_usdc: 10000
   min_volume_24h_usdc: 5000
   max_markets: 50
+  scan_all_markets: false     # true: ALLE aktiven Märkte statt Top-max_markets
+                              # (Tick dauert dann 45-70s — poll_interval_s erhöhen)
   max_negrisk_events: 20      # Top-N negRisk-Events nach Summen-Liquidität
   max_negrisk_submarkets: 20  # Events mit mehr Teilmärkten überspringen
+  use_stream: false           # true: WSS-Orderbuch-Stream + schneller Inner-Loop
+                              # zwischen den REST-Snapshots (ms-Reaktionszeit);
+                              # REST bleibt Fallback bei Stream-Ausfall
+  stream_tick_s: 0.5          # Intervall des Inner-Loops (nur mit use_stream)
+  stream_max_tokens: 500      # Abo-Deckel pro WSS-Verbindung

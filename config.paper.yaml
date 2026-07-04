@@ -1,21 +1,34 @@
-# Paper-Betriebskonfiguration: breiterer Scan mit schnellem Tick.
+# Paper-Betriebskonfiguration: Vollmarkt-Scan mit skaliertem Kapital.
 # Start: python -m polybot.main run --config config.paper.yaml
 
 mode: paper
-poll_interval_s: 5
+# Vollmarkt-Scan-Tick live gemessen (Juli 2026): 45-70s (Gamma-Fenster-
+# Pagination ~9.5k Märkte + Batch-Top-of-Book ~7k Tokens) — das Intervall
+# muss darüber liegen, sonst warnt der Bot jeden Tick vor Überlauf.
+poll_interval_s: 90
 
 risk:
-  max_order_usdc: 50
-  max_position_usdc: 200
-  max_total_exposure_usdc: 500
-  daily_loss_limit_usdc: 100
+  paper_start_cash: 100000    # Start-Cash NUR beim ersten Anlegen des Portfolios
+  # Limits mit dem Kapital mitskaliert (Verhältnisse wie beim 1k-Default):
+  max_order_usdc: 500
+  max_position_usdc: 2000
+  max_total_exposure_usdc: 20000
+  daily_loss_limit_usdc: 1000
   min_edge: 0.002             # Paper: auch kleine Edges mitnehmen (0.2 Cent)
 
 strategy:
   enabled:
     - complement_arb
     - negrisk_arb
-  max_markets: 150
+  scan_all_markets: true      # ALLE aktiven Märkte scannen (max_markets ohne Wirkung)
+  max_markets: 150            # nur relevant, falls scan_all_markets: false
   min_liquidity_usdc: 2000    # breiter scannen als im Beispiel (10k)
   min_volume_24h_usdc: 500
   min_order_shares: 5         # Polymarket-Mindestordergröße
+  # WebSocket-Streaming: zwischen den (langen) REST-Snapshots prüft ein
+  # Inner-Loop alle stream_tick_s die live gestreamten Orderbücher der
+  # Kandidaten-Tokens — Reaktionszeit in Millisekunden statt 90s. Fällt der
+  # Stream aus, läuft der Bot unverändert über REST weiter.
+  use_stream: true
+  stream_tick_s: 0.5
+  stream_max_tokens: 500

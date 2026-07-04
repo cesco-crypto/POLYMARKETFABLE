@@ -90,7 +90,7 @@ class StubPortfolio:
     fills: list = []
 
     @classmethod
-    def load(cls):
+    def load(cls, path="paper_state.json", start_cash=1000.0):
         return cls()
 
     def save(self):
