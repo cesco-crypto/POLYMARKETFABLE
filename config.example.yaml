@@ -1,0 +1,24 @@
+# Kopiere diese Datei nach config.yaml und passe sie an.
+# config.yaml ist in .gitignore — sie wird nie committet.
+
+mode: paper            # "paper" (Simulation) oder "live" (echtes Geld!)
+poll_interval_s: 10
+
+risk:
+  max_order_usdc: 50          # max. Größe einer einzelnen Order
+  max_position_usdc: 200      # max. Exposure pro Markt
+  max_total_exposure_usdc: 500
+  daily_loss_limit_usdc: 100  # Kill-Switch
+  min_edge: 0.01              # min. Arbitrage-Edge (1 Cent pro Share)
+
+strategy:
+  enabled:
+    - complement_arb
+    - negrisk_arb
+    # - market_making         # erst nach ausgiebigem Paper-Testing aktivieren
+  mm_spread: 0.02
+  mm_size_usdc: 25
+  mm_max_inventory_usdc: 100
+  min_liquidity_usdc: 10000
+  min_volume_24h_usdc: 5000
+  max_markets: 50

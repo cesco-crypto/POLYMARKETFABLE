@@ -1,0 +1,25 @@
+# Secrets — niemals committen!
+.env
+*.pem
+*.key
+config.yaml
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Laufzeitdaten
+data/
+logs/
+*.sqlite
+*.db
+paper_state.json
