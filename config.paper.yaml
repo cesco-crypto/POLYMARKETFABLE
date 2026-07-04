@@ -1,0 +1,21 @@
+# Paper-Betriebskonfiguration: breiterer Scan mit schnellem Tick.
+# Start: python -m polybot.main run --config config.paper.yaml
+
+mode: paper
+poll_interval_s: 5
+
+risk:
+  max_order_usdc: 50
+  max_position_usdc: 200
+  max_total_exposure_usdc: 500
+  daily_loss_limit_usdc: 100
+  min_edge: 0.002             # Paper: auch kleine Edges mitnehmen (0.2 Cent)
+
+strategy:
+  enabled:
+    - complement_arb
+    - negrisk_arb
+  max_markets: 150
+  min_liquidity_usdc: 2000    # breiter scannen als im Beispiel (10k)
+  min_volume_24h_usdc: 500
+  min_order_shares: 5         # Polymarket-Mindestordergröße

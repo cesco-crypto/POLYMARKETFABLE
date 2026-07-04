@@ -25,6 +25,7 @@ class ComplementArb(Strategy):
         signals: list[Signal] = []
         min_edge = self.cfg.risk.min_edge
         max_order = self.cfg.risk.max_order_usdc
+        min_shares = self.cfg.strategy.min_order_shares
 
         # NegRisk-Teilmärkte, die negrisk_arb bereits bearbeitet, auslassen:
         # sonst dimensionieren beide Strategien im selben Tick gegen dieselbe
@@ -61,7 +62,7 @@ class ComplementArb(Strategy):
             # Größe: begrenzt durch beide Ask-Level und das Order-Limit —
             # inkl. Gebühren, damit der reale Cash-Abfluss max_order nicht sprengt
             size = min(ya.size, na.size, max_order / max(cost + fees, 1e-9))
-            if size < 5:  # Mindestgröße, sonst lohnt es sich nicht
+            if size < min_shares:  # Mindestordergröße der Börse
                 continue
 
             group = f"comp:{m.condition_id[:12]}"

@@ -39,6 +39,7 @@ class NegRiskArb(Strategy):
     def _check_event(self, slug: str, markets, snap: MarketSnapshot) -> list[Signal]:
         min_edge = self.cfg.risk.min_edge
         max_order = self.cfg.risk.max_order_usdc
+        min_shares = self.cfg.strategy.min_order_shares
         n = len(markets)
 
         yes_asks, no_asks = [], []
@@ -66,7 +67,7 @@ class NegRiskArb(Strategy):
             # Gebühren im Nenner: realer Cash-Abfluss <= max_order_usdc
             size = min(min(a.size for _, a in yes_asks),
                        max_order / max(yes_cost + yes_fees, 1e-9))
-            if size >= 5:
+            if size >= min_shares:
                 log.info("NegRisk-Arb (YES) in '%s': Kosten %.3f, Edge %.3f, Größe %.0f",
                          slug, yes_cost, edge, size)
                 group = f"nrY:{slug[:20]}"
@@ -89,7 +90,7 @@ class NegRiskArb(Strategy):
         if edge_no >= min_edge:
             size = min(min(a.size for _, a in no_asks),
                        max_order / max(no_cost + no_fees, 1e-9))
-            if size >= 5:
+            if size >= min_shares:
                 log.info("NegRisk-Arb (NO) in '%s': Kosten %.3f, Auszahlung %d, Edge %.3f, Größe %.0f",
                          slug, no_cost, n - 1, edge_no, size)
                 group = f"nrN:{slug[:20]}"

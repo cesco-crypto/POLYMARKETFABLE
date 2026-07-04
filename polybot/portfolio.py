@@ -46,6 +46,7 @@ class Portfolio:
     positions: dict[str, Position] = field(default_factory=dict)
     fills: list[Fill] = field(default_factory=list)
     realized_pnl: float = 0.0
+    fees_paid: float = 0.0  # kumulierte Taker-Gebühren in USDC (bereits im Cash abgezogen)
     day_start_date: str = field(default_factory=_utc_today)  # UTC-Kalendertag
     # None = "beim Start setzen": wird in __post_init__ an den tatsächlichen
     # Startwert gekoppelt, damit Portfolio(cash=X) nicht sofort PnL zeigt.
@@ -101,8 +102,66 @@ class Portfolio:
             self.cash += fill.price * fill.size - fill.fee
         # Gebühren sind in jedem Fall realisierte Kosten
         self.realized_pnl -= fill.fee
+        self.fees_paid += fill.fee
         if pos.shares <= 1e-9:
             self.positions.pop(fill.token_id, None)
+
+    # ---- Merge zu USDC (Paper-Pendant zum on-chain CTF-Merge) --------------
+
+    def _consume_shares(self, token_id: str, shares: float) -> float:
+        """Shares aus einer Position entnehmen; Rückgabe: anteilige Einstandskosten."""
+        pos = self.positions[token_id]
+        avg_cost = pos.cost_basis / pos.shares if pos.shares > 0 else 0.0
+        cost = avg_cost * shares
+        pos.shares -= shares
+        pos.cost_basis -= cost
+        if pos.shares <= 1e-9:
+            self.positions.pop(token_id, None)
+        return cost
+
+    def _merge_sets(self, token_ids: list[str], payout_per_set: float, kind: str) -> float:
+        """Vollständige Sets (1 Share je Token) gegen payout_per_set USDC vernichten.
+
+        Realisiert den Arbitragegewinn sofort: payout minus anteilige
+        Einstandskosten aller Beine wandert in realized_pnl, der Payout in
+        Cash. Rückgabe: Anzahl gemergter Sets (0.0, wenn ein Bein fehlt).
+        """
+        if not token_ids or len(set(token_ids)) != len(token_ids):
+            return 0.0
+        sets = min(
+            (self.positions[t].shares if t in self.positions else 0.0)
+            for t in token_ids
+        )
+        if sets <= 1e-9:
+            return 0.0
+        cost = sum(self._consume_shares(t, sets) for t in token_ids)
+        payout = sets * payout_per_set
+        self.cash += payout
+        self.realized_pnl += payout - cost
+        log.info("Merge (%s): %.2f Sets -> %.2f USDC (Einstand %.2f, PnL %+.2f)",
+                 kind, sets, payout, cost, payout - cost)
+        return sets
+
+    def merge_pairs(self, yes_token: str, no_token: str) -> float:
+        """YES/NO-Paare eines binären Markts zu je 1 USDC mergen (CTF-Merge).
+
+        Vernichtet min(shares_yes, shares_no) Paare; Rückgabe: Anzahl Paare.
+        """
+        return self._merge_sets([yes_token, no_token], 1.0, "Komplement")
+
+    def merge_negrisk_yes(self, yes_tokens: list[str]) -> float:
+        """Vollständige YES-Sets eines NegRisk-Events zu je 1 USDC mergen.
+
+        Genau ein Outcome gewinnt -> ein Set aus allen YES zahlt sicher 1 USDC.
+        """
+        return self._merge_sets(list(yes_tokens), 1.0, "NegRisk-YES")
+
+    def merge_negrisk_no(self, no_tokens: list[str], n: int) -> float:
+        """Vollständige NO-Sets eines NegRisk-Events mit n Outcomes mergen.
+
+        Alle NO außer dem des Gewinners zahlen aus -> (n-1) USDC pro Set.
+        """
+        return self._merge_sets(list(no_tokens), float(n - 1), "NegRisk-NO")
 
     def value(self, marks: dict[str, float] | None = None) -> float:
         """Cash + Positionen (zu Marktpreisen, sonst zu Einstandskosten)."""
@@ -147,6 +206,7 @@ class Portfolio:
         data = {
             "cash": self.cash,
             "realized_pnl": self.realized_pnl,
+            "fees_paid": self.fees_paid,
             "day_start_date": self.day_start_date,
             "day_start_value": self.day_start_value,
             "positions": {k: asdict(v) for k, v in self.positions.items()},
@@ -175,6 +235,7 @@ class Portfolio:
         pf = cls(
             cash=data["cash"],
             realized_pnl=data.get("realized_pnl", 0.0),
+            fees_paid=data.get("fees_paid", 0.0),  # alte States: 0.0
             day_start_date=day_start_date,
             day_start_value=data.get("day_start_value", start_cash),
         )

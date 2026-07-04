@@ -197,6 +197,19 @@ def test_fill_gebuehr_reduziert_cash_und_pnl():
     assert pf.realized_pnl == pytest.approx(1.0 - 0.10 - 0.12)
 
 
+def test_fees_paid_kumuliert_und_persistiert(tmp_path):
+    # Gebühren als eigenes Portfolio-Feld ausweisen und über save/load erhalten.
+    pf = Portfolio(cash=100.0)
+    pf.apply_fill(Fill(ts=time.time(), token_id="t1", side="BUY",
+                       price=0.5, size=10, reason="", fee=0.10))
+    pf.apply_fill(Fill(ts=time.time(), token_id="t1", side="SELL",
+                       price=0.6, size=10, reason="", fee=0.12))
+    assert pf.fees_paid == pytest.approx(0.22)
+    path = tmp_path / "state.json"
+    pf.save(path)
+    assert Portfolio.load(path).fees_paid == pytest.approx(0.22)
+
+
 def test_value_warnt_bei_fehlendem_mark(caplog):
     # Fehlender Mark (Book-Fetch gescheitert): Fallback auf Einstand, aber laut.
     pf = Portfolio(cash=100.0)

@@ -22,3 +22,5 @@ strategy:
   min_liquidity_usdc: 10000
   min_volume_24h_usdc: 5000
   max_markets: 50
+  max_negrisk_events: 20      # Top-N negRisk-Events nach Summen-Liquidität
+  max_negrisk_submarkets: 20  # Events mit mehr Teilmärkten überspringen

@@ -1,40 +1,79 @@
-"""Regressionstests für den LiveBroker: Order-Lifecycle (Cancel vor
-Neu-Quoten) und Gruppen-Abbruch, wenn ein Arb-Bein scheitert.
+"""Regressionstests für Paper- und Live-Broker.
 
 Der echte ClobClient wird durch einen Fake ersetzt — es geht um die
-Broker-Logik, nicht um Netzwerk oder Signaturen.
+Broker-Logik (Buchung nur bestätigter Fills, Tick-Quantisierung, Gebühren,
+Gruppen-Abbruch/Unwind, Reconciliation), nicht um Netzwerk oder Signaturen.
 """
 
 import time
 
 import pytest
+from py_clob_client_v2.clob_types import OrderType
 
 from polybot.config import BotConfig
-from polybot.execution import LiveBroker, PaperBroker
+from polybot.execution import LiveBroker, PaperBroker, _quantize_price
 from polybot.data.orderbook import Level, OrderBook
 from polybot.portfolio import Fill, Portfolio, Position
 from polybot.strategies.base import Signal
 
 
 class FakeClobClient:
-    def __init__(self, fail_tokens: set[str] | None = None):
+    """Minimaler ClobClient-Ersatz: konfigurierbare Antworten, kein Netzwerk."""
+
+    def __init__(self, fail_tokens=None, statuses=None, responses=None,
+                 tick_fail_once=None, raise_tokens=None, text_response_tokens=None):
         self.fail_tokens = fail_tokens or set()
-        self.posted: list[str] = []      # token_ids in Sendereihenfolge
-        self.cancelled: list[str] = []   # gecancelte Order-IDs
+        self.statuses = statuses or {}            # token_id -> status in der post_order-Antwort
+        self.responses = responses or {}          # token_id -> zusätzliche Response-Felder
+        self.tick_fail_once = set(tick_fail_once or set())  # 1x "invalid tick size"
+        self.raise_tokens = raise_tokens or set()           # post_order wirft Exception
+        self.text_response_tokens = text_response_tokens or set()  # 200 ohne JSON
+        self.posted: list[str] = []               # token_ids in Sendereihenfolge
+        self.posted_types: list[str] = []         # zugehörige OrderTypes
+        self.created_prices: list[float] = []     # an create_order übergebene Preise
+        self.created_ticks: list = []             # explizit übergebene tick_size-Optionen
+        self.cancelled: list[str] = []            # gecancelte Order-IDs
+        self.orders: dict[str, dict] = {}         # get_order-Antworten je orderID
+        self.open_orders: list[dict] = []         # get_open_orders-Antwort
         self._n = 0
 
-    def get_tick_size(self, token_id: str) -> float:
-        return 0.01
+    def get_tick_size(self, token_id: str) -> str:
+        return "0.01"
 
     def create_order(self, args, options=None):
-        return {"token_id": args.token_id}
+        self.created_prices.append(args.price)
+        self.created_ticks.append(options.tick_size if options else None)
+        return {"token_id": args.token_id, "price": args.price, "size": args.size}
 
     def post_order(self, order, otype):
-        self.posted.append(order["token_id"])
-        if order["token_id"] in self.fail_tokens:
+        tok = order["token_id"]
+        self.posted.append(tok)
+        self.posted_types.append(otype)
+        if tok in self.raise_tokens:
+            raise RuntimeError("Request exception!")
+        if tok in self.text_response_tokens:
+            return "Internal Server Error"
+        if tok in self.tick_fail_once:
+            self.tick_fail_once.discard(tok)
+            return {"success": False, "errorMsg": "invalid tick size"}
+        if tok in self.fail_tokens:
             return {"success": False, "errorMsg": "not enough balance"}
         self._n += 1
-        return {"success": True, "orderID": f"oid{self._n}"}
+        oid = f"oid{self._n}"
+        # FOK/FAK matchen sofort oder gar nicht; GTC ruht standardmäßig.
+        default = "matched" if otype in (OrderType.FOK, OrderType.FAK) else "live"
+        resp = {"success": True, "orderID": oid, "status": self.statuses.get(tok, default)}
+        resp.update(self.responses.get(tok, {}))
+        return resp
+
+    def get_order(self, order_id: str) -> dict:
+        return self.orders.get(order_id, {"status": "live", "size_matched": "0"})
+
+    def get_open_orders(self, params=None, only_first_page=False, next_cursor=None):
+        return self.open_orders
+
+    def get_trades(self, params=None, only_first_page=False, next_cursor=None):
+        return []
 
     def cancel_order(self, payload):
         self.cancelled.append(payload.orderID)
@@ -46,6 +85,9 @@ def make_live_broker(client: FakeClobClient) -> LiveBroker:
     broker = LiveBroker.__new__(LiveBroker)
     broker.client = client
     broker._open_orders = {}
+    broker._pending = {}
+    broker.fallback_fee_rate = 0.0
+    broker.DELAY_POLL_INTERVAL_S = 0  # Tests sollen nicht schlafen
     return broker
 
 
@@ -53,6 +95,13 @@ def mm_quote(side: str, price: float) -> Signal:
     return Signal(token_id="tok", side=side, price=price, size=10,
                   reason="MM", replace=True)
 
+
+def arb_leg(token: str, group: str = "g1", price: float = 0.30) -> Signal:
+    return Signal(token_id=token, side="BUY", price=price, size=10,
+                  reason="arb", group=group)
+
+
+# ---- LiveBroker: Order-Lifecycle ------------------------------------------
 
 def test_livebroker_cancelt_alte_quotes_vor_neuquote():
     client = FakeClobClient()
@@ -71,16 +120,111 @@ def test_livebroker_cancelt_alte_quotes_vor_neuquote():
     assert broker._open_orders["tok"] == ["oid3", "oid4"]
 
 
+def test_livebroker_bucht_gtc_nicht_sofort_als_fill():
+    # Regressionstest: resp["success"] hieß früher "Fill über volle Größe" —
+    # eine ruhende GTC-Order ist aber noch gar nicht gefüllt.
+    client = FakeClobClient()  # GTC -> status "live"
+    broker = make_live_broker(client)
+    pf = Portfolio(cash=100.0)
+    sig = Signal(token_id="tok", side="BUY", price=0.50, size=10, reason="MM")
+    fills = broker.execute([sig], {}, pf)
+    assert fills == 0
+    assert pf.positions == {}
+    assert pf.cash == pytest.approx(100.0)
+    assert "oid1" in broker._pending  # aber getrackt für die Reconciliation
+
+
+def test_livebroker_reconciled_teilfills_ruhender_orders():
+    client = FakeClobClient()
+    broker = make_live_broker(client)
+    pf = Portfolio(cash=100.0)
+    broker.execute([Signal(token_id="tok", side="BUY", price=0.50, size=10,
+                           reason="MM")], {}, pf)
+
+    # Teil-Fill: der nächste Tick bucht genau das Delta (Maker -> Gebühr 0)
+    client.orders["oid1"] = {"status": "live", "size_matched": "4", "price": "0.50"}
+    assert broker.execute([], {}, pf) == 1
+    assert pf.positions["tok"].shares == pytest.approx(4)
+    assert pf.cash == pytest.approx(100.0 - 2.0)
+
+    # Rest gefüllt -> nur das neue Delta, danach Tracking beendet
+    client.orders["oid1"] = {"status": "matched", "size_matched": "10", "price": "0.50"}
+    assert broker.execute([], {}, pf) == 1
+    assert pf.positions["tok"].shares == pytest.approx(10)
+    assert pf.cash == pytest.approx(100.0 - 5.0)
+    assert "oid1" not in broker._pending
+
+
+def test_livebroker_bucht_matched_mit_tatsaechlichen_mengen():
+    # Regressionstest: gebucht wurde zum Signalpreis statt zu den realen
+    # Beträgen aus der Response (makingAmount/takingAmount).
+    client = FakeClobClient(responses={"tok": {"makingAmount": "2.85", "takingAmount": "10"}})
+    broker = make_live_broker(client)
+    pf = Portfolio(cash=100.0)
+    fills = broker.execute([arb_leg("tok", price=0.30)], {}, pf)
+    assert fills == 1
+    assert pf.positions["tok"].shares == pytest.approx(10)
+    assert pf.cash == pytest.approx(100.0 - 2.85)  # 0.285/Share statt 0.30
+
+
+def test_livebroker_bucht_taker_gebuehr():
+    # Regressionstest: FOK-Fills sind Taker-Fills, zahlten aber keine Gebühr.
+    client = FakeClobClient()
+    broker = make_live_broker(client)
+    pf = Portfolio(cash=100.0)
+    sig = Signal(token_id="tok", side="BUY", price=0.50, size=10, reason="arb", group="g1")
+    broker.execute([sig], {}, pf, fee_rates={"tok": 0.04})
+    # fee = 10 * 0.04 * 0.5 * (1-0.5) = 0.10 USDC
+    assert pf.cash == pytest.approx(100.0 - 5.0 - 0.10)
+    assert pf.realized_pnl == pytest.approx(-0.10)
+
+
+# ---- LiveBroker: Tick-Raster ----------------------------------------------
+
+def test_quantize_price_rundet_konservativ():
+    assert _quantize_price(0.155, 0.01, "BUY") == pytest.approx(0.15)
+    assert _quantize_price(0.155, 0.01, "SELL") == pytest.approx(0.16)
+    assert _quantize_price(0.30, 0.01, "BUY") == pytest.approx(0.30)
+    assert _quantize_price(0.1275, 0.0025, "BUY") == pytest.approx(0.1275)
+    # Bereichsklemme: nie unter tick bzw. über 1-tick
+    assert _quantize_price(0.004, 0.01, "BUY") == pytest.approx(0.01)
+    assert _quantize_price(0.998, 0.01, "SELL") == pytest.approx(0.99)
+
+
+def test_livebroker_quantisiert_preis_aufs_tick_raster():
+    # Regressionstest: round(price, 3) ließ 0.155 stehen; der Client hätte
+    # daraus per round_normal 0.16 gemacht — teurer als kalkuliert.
+    client = FakeClobClient()
+    broker = make_live_broker(client)
+    pf = Portfolio(cash=100.0)
+    broker.execute([arb_leg("tok", price=0.155)], {}, pf)
+    assert client.created_prices == [pytest.approx(0.15)]  # BUY: abgerundet
+    assert pf.positions["tok"].cost_basis == pytest.approx(1.5)  # gebucht zum Orderpreis
+
+
+def test_livebroker_holt_frischen_tick_nach_ablehnung():
+    # Regressionstest: der Client cacht den Tick für immer — nach einem
+    # Tick-Wechsel wurde der Markt dauerhaft unhandelbar.
+    client = FakeClobClient(tick_fail_once={"tok"})
+    broker = make_live_broker(client)
+    broker._fresh_tick = lambda token_id: "0.001"  # statt HTTP-Abfrage
+    pf = Portfolio(cash=100.0)
+    fills = broker.execute([arb_leg("tok", price=0.1275)], {}, pf)
+    assert fills == 1
+    assert client.posted == ["tok", "tok"]  # genau ein Retry
+    # 1. Versuch: Cache-Tick 0.01 -> 0.12; Retry: frischer Tick 0.001 -> 0.127
+    assert client.created_prices == [pytest.approx(0.12), pytest.approx(0.127)]
+    assert client.created_ticks == [None, "0.001"]  # frischer Tick übersteuert Cache
+
+
+# ---- LiveBroker: Gruppen-Atomarität ---------------------------------------
+
 def test_livebroker_bricht_gruppe_nach_gescheitertem_bein_ab():
     # FOK sichert nur die Einzelorder: scheitert Bein 2, darf Bein 3
     # gar nicht mehr gesendet werden (halber Arb = offene Wette).
     client = FakeClobClient(fail_tokens={"t2"})
     broker = make_live_broker(client)
-    group = [
-        Signal(token_id="t1", side="BUY", price=0.30, size=10, reason="arb", group="g1"),
-        Signal(token_id="t2", side="BUY", price=0.30, size=10, reason="arb", group="g1"),
-        Signal(token_id="t3", side="BUY", price=0.30, size=10, reason="arb", group="g1"),
-    ]
+    group = [arb_leg("t1"), arb_leg("t2"), arb_leg("t3")]
     fills = broker.execute(group, {}, Portfolio())
     assert client.posted == ["t1", "t2"]  # t3 wurde nicht mehr gesendet
     assert fills == 1
@@ -89,14 +233,80 @@ def test_livebroker_bricht_gruppe_nach_gescheitertem_bein_ab():
 def test_livebroker_gruppenabbruch_stoppt_nicht_andere_gruppen():
     client = FakeClobClient(fail_tokens={"a1"})
     broker = make_live_broker(client)
-    signals = [
-        Signal(token_id="a1", side="BUY", price=0.30, size=10, reason="arb", group="gA"),
-        Signal(token_id="a2", side="BUY", price=0.30, size=10, reason="arb", group="gA"),
-        Signal(token_id="b1", side="BUY", price=0.30, size=10, reason="arb", group="gB"),
-    ]
+    signals = [arb_leg("a1", group="gA"), arb_leg("a2", group="gA"),
+               arb_leg("b1", group="gB")]
     broker.execute(signals, {}, Portfolio())
     assert client.posted == ["a1", "b1"]
 
+
+def test_livebroker_unwind_stellt_gefuelltes_bein_glatt():
+    # Regressionstest: nach gescheitertem Bein blieb das bereits gefüllte
+    # Bein als offene, ungehedgte Position stehen.
+    client = FakeClobClient(fail_tokens={"t2"})
+    broker = make_live_broker(client)
+    pf = Portfolio(cash=100.0)
+    books = {"t1": OrderBook(token_id="t1", bids=[Level(0.29, 100)], asks=[])}
+    broker.execute([arb_leg("t1"), arb_leg("t2")], books, pf)
+    # Bein t1 gefüllt (BUY 10 @0.30), t2 scheiterte -> FAK-Gegenorder zum Bid
+    assert client.posted == ["t1", "t2", "t1"]
+    assert client.posted_types[-1] == OrderType.FAK
+    assert pf.positions == {}  # glattgestellt
+    assert pf.realized_pnl == pytest.approx((0.29 - 0.30) * 10)
+
+
+# ---- LiveBroker: unklare POST-Zustände & Matching-Delay --------------------
+
+def test_livebroker_verifiziert_zustand_nach_post_exception():
+    # Regressionstest: ein Read-Timeout nach angenommener Order hinterließ
+    # eine hängende Live-Order, von der das Portfolio nichts wusste.
+    client = FakeClobClient(raise_tokens={"tok"})
+    client.open_orders = [{"id": "ghost1", "size_matched": "0"}]
+    broker = make_live_broker(client)
+    pf = Portfolio(cash=100.0)
+    fills = broker.execute([arb_leg("tok")], {}, pf)
+    assert fills == 0
+    assert pf.positions == {}
+    assert "ghost1" in client.cancelled  # hängende Order wurde aufgeräumt
+
+
+def test_livebroker_uebersteht_antwort_ohne_json():
+    # Regressionstest: eine 200-Antwort als String führte zu AttributeError
+    # bei resp.get(...) — und die Order blieb ungebucht liegen.
+    client = FakeClobClient(text_response_tokens={"tok"})
+    client.open_orders = [{"id": "ghost2", "size_matched": "0"}]
+    broker = make_live_broker(client)
+    pf = Portfolio(cash=100.0)
+    fills = broker.execute([arb_leg("tok")], {}, pf)
+    assert fills == 0
+    assert pf.positions == {}
+    assert "ghost2" in client.cancelled
+
+
+def test_livebroker_delayed_wartet_auf_bestaetigung():
+    # Regressionstest: status "delayed" (Matching-Delay, z.B. Sport in-play)
+    # wurde sofort als Fill über die volle Größe gebucht.
+    client = FakeClobClient(statuses={"tok": "delayed"})
+    client.orders["oid1"] = {"status": "matched", "size_matched": "10", "price": "0.30"}
+    broker = make_live_broker(client)
+    pf = Portfolio(cash=100.0)
+    fills = broker.execute([arb_leg("tok")], {}, pf)
+    assert fills == 1
+    assert pf.positions["tok"].shares == pytest.approx(10)
+    assert pf.cash == pytest.approx(100.0 - 3.0)
+
+
+def test_livebroker_delayed_ohne_bestaetigung_wird_gecancelt():
+    client = FakeClobClient(statuses={"tok": "delayed"})
+    client.orders["oid1"] = {"status": "delayed", "size_matched": "0"}
+    broker = make_live_broker(client)
+    pf = Portfolio(cash=100.0)
+    fills = broker.execute([arb_leg("tok")], {}, pf)
+    assert fills == 0
+    assert pf.positions == {}
+    assert "oid1" in client.cancelled  # sonst könnte das Bein später ungehedged matchen
+
+
+# ---- PaperBroker ------------------------------------------------------------
 
 def test_paperbroker_fill_nur_gegen_buchliquiditaet():
     # bestehendes Verhalten abgesichert: BUY füllt nur, was im Ask liegt
@@ -106,6 +316,32 @@ def test_paperbroker_fill_nur_gegen_buchliquiditaet():
     sig = Signal(token_id="tok", side="BUY", price=0.50, size=10, reason="test")
     assert broker.execute([sig], {"tok": book}, pf) == 1
     assert pf.positions["tok"].shares == pytest.approx(7)
+
+
+def test_paperbroker_fuellt_zu_level_preisen():
+    # Regressionstest: gefüllt wurde pauschal zum Limitpreis, obwohl
+    # Liquidität günstiger im Buch lag — die Simulation überzahlte.
+    broker = PaperBroker()
+    pf = Portfolio(cash=100.0)
+    book = OrderBook(token_id="tok", bids=[],
+                     asks=[Level(0.50, 5), Level(0.52, 5), Level(0.60, 5)])
+    sig = Signal(token_id="tok", side="BUY", price=0.55, size=10, reason="test")
+    assert broker.execute([sig], {"tok": book}, pf) == 1
+    # 5 @0.50 + 5 @0.52 = 5.10 USDC (VWAP 0.51), nicht 10 @0.55 = 5.50
+    assert pf.positions["tok"].shares == pytest.approx(10)
+    assert pf.cash == pytest.approx(100.0 - 5.10)
+    assert pf.fills[-1].price == pytest.approx(0.51)
+
+
+def test_paperbroker_signale_teilen_sich_buchliquiditaet():
+    # Regressionstest: zwei Signale auf dasselbe Token konsumierten dieselbe
+    # Buchliquidität doppelt (available je Signal frisch aus dem Snapshot).
+    broker = PaperBroker()
+    pf = Portfolio(cash=100.0)
+    book = OrderBook(token_id="tok", bids=[], asks=[Level(0.50, 10)])
+    sig = Signal(token_id="tok", side="BUY", price=0.50, size=7, reason="test")
+    assert broker.execute([sig, sig], {"tok": book}, pf) == 2
+    assert pf.positions["tok"].shares == pytest.approx(10)  # 7 + 3, nicht 7 + 7
 
 
 def test_paperbroker_kappt_kauf_am_cash():
@@ -142,6 +378,88 @@ def test_paperbroker_verbucht_taker_gebuehr():
     # fee = 10 * 0.04 * 0.5 * (1-0.5) = 0.10 USDC
     assert pf.cash == pytest.approx(100.0 - 5.0 - 0.10)
     assert pf.realized_pnl == pytest.approx(-0.10)
+
+
+def test_paperbroker_weist_fees_paid_im_portfolio_aus():
+    # Gebühren müssen als eigenes Feld sichtbar sein, nicht nur im PnL versteckt.
+    broker = PaperBroker()
+    pf = Portfolio(cash=100.0)
+    book = OrderBook(token_id="tok", bids=[], asks=[Level(0.50, 100)])
+    sig = Signal(token_id="tok", side="BUY", price=0.50, size=10, reason="test")
+    broker.execute([sig], {"tok": book}, pf, fee_rates={"tok": 0.04})
+    assert pf.fees_paid == pytest.approx(0.10)  # 10 * 0.04 * 0.5 * 0.5
+
+
+# ---- PaperBroker: FOK-Semantik für Signalgruppen ----------------------------
+
+def make_book(token: str, ask: Level | None = None, bid: Level | None = None) -> OrderBook:
+    return OrderBook(token_id=token, bids=[bid] if bid else [], asks=[ask] if ask else [])
+
+
+def test_paperbroker_gruppe_fok_bucht_alle_beine():
+    broker = PaperBroker()
+    pf = Portfolio(cash=100.0)
+    books = {"t1": make_book("t1", ask=Level(0.30, 20)),
+             "t2": make_book("t2", ask=Level(0.60, 20))}
+    fills = broker.execute([arb_leg("t1"), arb_leg("t2", price=0.60)], books, pf)
+    assert fills == 2
+    assert pf.positions["t1"].shares == pytest.approx(10)
+    assert pf.positions["t2"].shares == pytest.approx(10)
+    assert pf.cash == pytest.approx(100.0 - 3.0 - 6.0)
+
+
+def test_paperbroker_gruppe_fok_kein_bein_bei_zu_wenig_liquiditaet():
+    # FOK: Bein t2 ist nur teilweise füllbar -> KEIN Bein der Gruppe füllt,
+    # sonst bliebe ein halber Arb als offene, ungehedgte Wette stehen.
+    broker = PaperBroker()
+    pf = Portfolio(cash=100.0)
+    books = {"t1": make_book("t1", ask=Level(0.30, 20)),
+             "t2": make_book("t2", ask=Level(0.60, 4))}  # nur 4 von 10 im Buch
+    fills = broker.execute([arb_leg("t1"), arb_leg("t2", price=0.60)], books, pf)
+    assert fills == 0
+    assert pf.positions == {}
+    assert pf.cash == pytest.approx(100.0)
+
+
+def test_paperbroker_gruppe_fok_kein_bein_bei_zu_wenig_cash():
+    # Bein 1 passt ins Cash, Bein 2 nicht mehr vollständig -> Gruppe weg.
+    broker = PaperBroker()
+    pf = Portfolio(cash=6.0)
+    books = {"t1": make_book("t1", ask=Level(0.50, 100)),
+             "t2": make_book("t2", ask=Level(0.50, 100))}
+    fills = broker.execute([arb_leg("t1", price=0.50), arb_leg("t2", price=0.50)],
+                           books, pf)
+    assert fills == 0
+    assert pf.positions == {}
+    assert pf.cash == pytest.approx(6.0)
+
+
+def test_paperbroker_gruppe_fok_sell_ueber_bestand_verwirft_gruppe():
+    # SELL-Bein über den Bestand hinaus ist nicht voll füllbar (kein Shorting).
+    broker = PaperBroker()
+    pf = Portfolio(cash=100.0)
+    pf.apply_fill(Fill(ts=time.time(), token_id="t1", side="BUY",
+                       price=0.50, size=5, reason=""))
+    books = {"t1": make_book("t1", bid=Level(0.60, 100)),
+             "t2": make_book("t2", ask=Level(0.30, 100))}
+    group = [Signal(token_id="t1", side="SELL", price=0.60, size=10,
+                    reason="arb", group="g1"),
+             arb_leg("t2")]
+    assert broker.execute(group, books, pf) == 0
+    assert pf.positions["t1"].shares == pytest.approx(5)  # nichts verkauft
+
+
+def test_paperbroker_gescheiterte_gruppe_gibt_liquiditaet_und_cash_frei():
+    # Das tentativ verplante Bein t1 der gescheiterten Gruppe darf die
+    # Liquidität/das Cash für spätere unabhängige Signale nicht blockieren.
+    broker = PaperBroker()
+    pf = Portfolio(cash=100.0)
+    books = {"t1": make_book("t1", ask=Level(0.30, 10))}  # t2 fehlt -> Gruppe weg
+    signals = [arb_leg("t1"), arb_leg("t2"),
+               Signal(token_id="t1", side="BUY", price=0.30, size=10, reason="solo")]
+    assert broker.execute(signals, books, pf) == 1
+    assert pf.positions["t1"].shares == pytest.approx(10)  # volle 10 fürs Solo-Signal
+    assert pf.cash == pytest.approx(100.0 - 3.0)
 
 
 def test_paperbroker_fallback_fee_rate_aus_config():

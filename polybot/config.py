@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,6 +11,8 @@ import yaml
 from dotenv import load_dotenv
 
 load_dotenv()
+
+log = logging.getLogger(__name__)
 
 CLOB_HOST = "https://clob.polymarket.com"
 GAMMA_HOST = "https://gamma-api.polymarket.com"
@@ -45,6 +48,16 @@ class StrategyConfig:
     min_liquidity_usdc: float = 10_000.0
     min_volume_24h_usdc: float = 5_000.0
     max_markets: int = 50
+    # Mindestgröße einer Order in Shares (Polymarket-Minimum ist meist 5);
+    # Signale unterhalb dieser Größe werden von den Strategien verworfen.
+    min_order_shares: float = 5.0
+    # negRisk-Auswahl: ohne Deckel würden die Orderbücher ALLER Events geladen
+    # (live gemessen ~70 Events / ~5000 Tokens -> ein Tick dauert länger als
+    # poll_interval_s). Nur die Top-N Events nach Summen-Liquidität behalten;
+    # Events mit sehr vielen Teilmärkten überspringen — dort fehlt fast immer
+    # mindestens ein Buch und negrisk_arb verwirft sie dann ohnehin komplett.
+    max_negrisk_events: int = 20
+    max_negrisk_submarkets: int = 20
 
 
 @dataclass
@@ -60,15 +73,50 @@ class BotConfig:
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> "BotConfig":
+        """Lädt die Config.
+
+        path=None bedeutet: implizit config.yaml probieren, Fehlen tolerieren
+        (Defaults). Ein EXPLIZIT übergebener Pfad muss existieren — ein
+        Tippfehler in --config darf den Bot nicht stillschweigend mit
+        Default-Risikolimits starten.
+        """
         raw: dict = {}
-        if path and Path(path).exists():
+        if path is not None:
+            if not Path(path).exists():
+                raise SystemExit(f"Config-Datei {path} nicht gefunden")
             raw = yaml.safe_load(Path(path).read_text()) or {}
+        elif Path("config.yaml").exists():
+            raw = yaml.safe_load(Path("config.yaml").read_text()) or {}
+        else:
+            log.info("Keine config.yaml gefunden — Built-in-Defaults werden verwendet")
+
+        def section(key: str, section_cls):
+            # 'risk:' ohne Wert liefert None (nicht {}) — 'or {}' fängt das ab.
+            data = raw.get(key) or {}
+            try:
+                return section_cls(**data)
+            except TypeError as e:
+                raise SystemExit(
+                    f"Ungültiger Config-Abschnitt '{key}': {e}"
+                ) from e
+
         cfg = cls(
             mode=raw.get("mode", "paper"),
             poll_interval_s=float(raw.get("poll_interval_s", 10.0)),
-            risk=RiskConfig(**raw.get("risk", {})),
-            strategy=StrategyConfig(**raw.get("strategy", {})),
+            risk=section("risk", RiskConfig),
+            strategy=section("strategy", StrategyConfig),
         )
+        if cfg.poll_interval_s <= 0:
+            raise SystemExit("poll_interval_s muss > 0 sein")
+        for name in ("max_order_usdc", "max_position_usdc",
+                     "max_total_exposure_usdc", "daily_loss_limit_usdc"):
+            if getattr(cfg.risk, name) < 0:
+                raise SystemExit(f"risk.{name} darf nicht negativ sein")
+        if cfg.strategy.min_order_shares < 0:
+            raise SystemExit("strategy.min_order_shares darf nicht negativ sein")
+        if not 0.0 <= cfg.risk.taker_fee_rate <= 0.1:
+            raise SystemExit("risk.taker_fee_rate muss zwischen 0 und 0.1 liegen "
+                             "(Polymarket-Maximum ist 0.07)")
         cfg.private_key = os.environ.get("POLY_PRIVATE_KEY")
         cfg.funder_address = os.environ.get("POLY_FUNDER_ADDRESS")
         cfg.signature_type = int(os.environ.get("POLY_SIGNATURE_TYPE", "2"))

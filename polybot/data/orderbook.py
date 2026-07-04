@@ -64,40 +64,9 @@ class BookClient:
     def __init__(self, session: requests.Session | None = None):
         self.http = session or requests.Session()
         self.http.headers["User-Agent"] = "polybot/0.1"
-        # Taker-Fee-Raten sind kategorieabhängig (0.00-0.07) und ändern sich
-        # praktisch nie -> pro Token einmal holen und cachen.
-        self._fee_rate_cache: dict[str, float] = {}
-
-    def get_fee_rate(self, token_id: str) -> float | None:
-        """Taker-Fee-Rate eines Tokens (GET /fee-rate); None bei Fehler."""
-        if token_id in self._fee_rate_cache:
-            return self._fee_rate_cache[token_id]
-        try:
-            r = self.http.get(f"{CLOB_HOST}/fee-rate", params={"token_id": token_id}, timeout=15)
-            r.raise_for_status()
-            data = r.json()
-        except (requests.RequestException, ValueError) as e:
-            log.warning("Fee-Rate für %s nicht abrufbar: %s", token_id[:16], e)
-            return None
-        raw = data.get("taker_fee_rate", data.get("fee_rate")) if isinstance(data, dict) else data
-        try:
-            rate = float(raw)
-        except (TypeError, ValueError):
-            log.warning("Fee-Rate für %s nicht interpretierbar: %r", token_id[:16], raw)
-            return None
-        if rate > 1.0:  # Endpunkt liefert Basispunkte statt Dezimalrate
-            rate /= 10_000.0
-        self._fee_rate_cache[token_id] = rate
-        return rate
-
-    def get_fee_rates(self, token_ids: list[str]) -> dict[str, float]:
-        """Fee-Raten für mehrere Tokens; nicht abrufbare Tokens fehlen im Ergebnis."""
-        out: dict[str, float] = {}
-        for t in token_ids:
-            rate = self.get_fee_rate(t)
-            if rate is not None:
-                out[t] = rate
-        return out
+        # Hinweis: Taker-Fee-Raten kommen NICHT von hier — CLOB GET /fee-rate
+        # liefert live nur `{"base_fee": 1000}` ohne Kategorierate. Quelle ist
+        # das Gamma-Marktobjekt (siehe data/fees.FeeRateCache).
 
     def get_book(self, token_id: str) -> OrderBook | None:
         try:
@@ -109,6 +78,45 @@ class BookClient:
         except (requests.RequestException, ValueError, KeyError, TypeError, AttributeError) as e:
             log.warning("Orderbuch für %s nicht abrufbar/parsebar: %s", token_id[:16], e)
             return None
+
+    def get_top_prices(self, token_ids: list[str]) -> dict[str, tuple[float | None, float | None]]:
+        """Top-of-Book-Preise (best_bid, best_ask) ohne Größen via POST /prices.
+
+        Deutlich billiger als volle Bücher: 200 Tokens pro Request statt 50
+        (Server-Limit: 500 Einträge pro Payload, live gemessen). Antwortformat
+        {token_id: {"BUY": "0.40", "SELL": "0.45"}} — BUY ist der beste Bid,
+        SELL der beste Ask (live gegen /book verifiziert). Rückgabe enthält
+        nur Tokens mit mindestens einem Preis; ein leeres Dict bei Komplett-
+        ausfall signalisiert dem Aufrufer, auf get_books zurückzufallen.
+        """
+        out: dict[str, tuple[float | None, float | None]] = {}
+        for chunk_start in range(0, len(token_ids), 200):
+            chunk = token_ids[chunk_start : chunk_start + 200]
+            body = [{"token_id": t, "side": s} for t in chunk for s in ("BUY", "SELL")]
+            try:
+                r = self.http.post(f"{CLOB_HOST}/prices", json=body, timeout=30)
+                r.raise_for_status()
+                rows = r.json()
+                items = rows.items()
+            except (requests.RequestException, ValueError, AttributeError) as e:
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                if status == 429:
+                    # Rate-Limit: weitere Batches würden es nur verschärfen.
+                    log.warning("CLOB rate-limitiert (429) — Preis-Batch-Lauf "
+                                "abgebrochen, %d Tokens als Teilergebnis", len(out))
+                    break
+                log.warning("Batch-Preise (POST /prices) fehlgeschlagen: %s", e)
+                continue
+            for tid, sides in items:
+                # Eine kaputte Row überspringen statt den Batch zu verwerfen.
+                try:
+                    bid = float(sides["BUY"]) if sides.get("BUY") else None
+                    ask = float(sides["SELL"]) if sides.get("SELL") else None
+                except (TypeError, ValueError, KeyError, AttributeError):
+                    continue
+                if bid is not None or ask is not None:
+                    out[tid] = (bid, ask)
+        return out
 
     def get_books(self, token_ids: list[str]) -> dict[str, OrderBook]:
         """Mehrere Orderbücher in einem Request (POST /books)."""

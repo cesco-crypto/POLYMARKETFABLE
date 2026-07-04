@@ -34,6 +34,32 @@ class Market:
     # Event erlaubt nachträgliches Hinzufügen von Outcomes (negRiskAugmented):
     # dann zahlt "alle gelisteten YES kaufen" nicht garantiert 1 USDC aus.
     neg_risk_augmented: bool = False
+    # Taker-Fee-Rate der Marktkategorie (0.00-0.07, gilt für YES wie NO);
+    # None = Gamma lieferte keine Fee-Info -> Aufrufer nutzen den
+    # konfigurierten Fallback (cfg.risk.taker_fee_rate).
+    fee_rate: float | None = None
+
+
+def _parse_fee_rate(m: dict) -> float | None:
+    """Taker-Fee-Rate aus dem Gamma-Marktobjekt lesen.
+
+    Live-Befund (Juli 2026): Gamma-Märkte tragen `feesEnabled` und
+    `feeSchedule.rate` — die Rate deckt sich exakt mit der offiziellen
+    Kategorien-Tabelle (z.B. Sport 0.03, Politik 0.04, Economics 0.05);
+    gebührenfreie Märkte (Geopolitik) haben feesEnabled=false. Der CLOB-
+    Endpunkt GET /fee-rate liefert dagegen nur ein nicht interpretierbares
+    `{"base_fee": 1000}` und taugt nicht als Quelle.
+    """
+    if m.get("feesEnabled") is False:
+        return 0.0
+    schedule = m.get("feeSchedule")
+    raw = schedule.get("rate") if isinstance(schedule, dict) else None
+    try:
+        rate = float(raw)
+    except (TypeError, ValueError):
+        return None
+    # Unplausible Werte verwerfen -> konservativer Fallback statt Mini-Fee
+    return rate if 0.0 <= rate <= 1.0 else None
 
 
 def _parse_market(m: dict) -> Market | None:
@@ -52,6 +78,7 @@ def _parse_market(m: dict) -> Market | None:
             neg_risk=bool(m.get("negRisk", False)),
             closed=bool(m.get("closed", False)),
             neg_risk_augmented=bool(m.get("negRiskAugmented", False)),
+            fee_rate=_parse_fee_rate(m),
         )
     except (ValueError, TypeError, json.JSONDecodeError):
         return None

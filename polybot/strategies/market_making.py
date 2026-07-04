@@ -53,7 +53,7 @@ class MarketMaking(Strategy):
             exposure = pf.exposure(m.yes_token) if pf else 0.0
             room = s.mm_max_inventory_usdc - exposure
             bid_size = min(size, room / max(bid_px, 1e-9))
-            if bid_size >= 5:
+            if bid_size >= s.min_order_shares:
                 signals.append(Signal(
                     token_id=m.yes_token, side="BUY", price=bid_px, size=bid_size,
                     reason="MM Bid", market_question=m.question, replace=True,
@@ -62,7 +62,7 @@ class MarketMaking(Strategy):
             # Ask nur gegen tatsächlich gehaltene Shares — Polymarket erlaubt
             # kein Shorting, und ein ungedeckter Paper-SELL wäre Phantom-Gewinn.
             ask_size = min(size, held_shares)
-            if ask_size >= 5:
+            if ask_size >= s.min_order_shares:
                 signals.append(Signal(
                     token_id=m.yes_token, side="SELL", price=ask_px, size=ask_size,
                     reason="MM Ask", market_question=m.question, replace=True,

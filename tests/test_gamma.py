@@ -3,7 +3,7 @@ import json
 import pytest
 import requests
 
-from polybot.data.gamma import GammaClient
+from polybot.data.gamma import GammaClient, _parse_market
 
 
 def gamma_market_row(i: int, closed: bool = False, active: bool = True) -> dict:
@@ -123,6 +123,37 @@ def test_active_markets_dedupliziert_bei_seitenueberlappung():
     out = gc.active_markets(limit=200)
     ids = [m.condition_id for m in out]
     assert len(ids) == len(set(ids)) == 101
+
+
+# ---- Fee-Rate-Parsing (Quelle: feesEnabled + feeSchedule.rate) -------------
+
+def test_parse_market_liest_fee_rate_aus_fee_schedule():
+    row = gamma_market_row(0)
+    row["feesEnabled"] = True
+    row["feeSchedule"] = {"exponent": 1, "rate": 0.03, "takerOnly": True,
+                          "rebateRate": 0.25}
+    assert _parse_market(row).fee_rate == pytest.approx(0.03)
+
+
+def test_parse_market_fees_disabled_bedeutet_rate_null():
+    # Gebührenfreie Kategorien (Geopolitik) haben feesEnabled=false und
+    # kein feeSchedule — das ist eine echte 0.0, kein "unbekannt".
+    row = gamma_market_row(0)
+    row["feesEnabled"] = False
+    assert _parse_market(row).fee_rate == 0.0
+
+
+def test_parse_market_ohne_fee_info_liefert_none():
+    # None -> Aufrufer fallen auf cfg.risk.taker_fee_rate (Maximum) zurück.
+    assert _parse_market(gamma_market_row(0)).fee_rate is None
+
+
+def test_parse_market_verwirft_unplausible_fee_rate():
+    row = gamma_market_row(0)
+    row["feesEnabled"] = True
+    for raw in ("abc", None, -0.01, 1000):  # 1000 = bps-Rohwert, keine Dezimalrate
+        row["feeSchedule"] = {"rate": raw}
+        assert _parse_market(row).fee_rate is None
 
 
 class FakeResponse:
