@@ -12,7 +12,10 @@ eines. Daraus folgen zwei Arbitrage-Strukturen:
 Voraussetzung: wirklich ALLE Outcomes des Events sind handelbar erfasst —
 fehlt eines, ist Struktur (1) nicht mehr risikofrei. Der Bot handelt deshalb
 nur Events, bei denen Polymarket das negRisk-Flag setzt und alle Teilmärkte
-offen sind.
+offen sind (gamma.negrisk_events überspringt Events mit geschlossenen
+Teilmärkten komplett). Bei negRiskAugmented-Events kann Polymarket später
+Outcomes hinzufügen — dort ist nur Struktur (2) risikofrei (Auszahlung
+>= n-1 auch bei neuem Gewinner-Outcome), Struktur (1) wird ausgelassen.
 """
 
 from __future__ import annotations
@@ -48,14 +51,21 @@ class NegRiskArb(Strategy):
             no_asks.append((m, nb.best_ask))
 
         out: list[Signal] = []
-        fee_rate = self.cfg.risk.taker_fee_rate
 
-        # Struktur 1: alle YES kaufen
+        # Struktur 1: alle YES kaufen — nur risikofrei, wenn die Outcome-Menge
+        # garantiert vollständig bleibt; bei negRiskAugmented-Events kann
+        # Polymarket Outcomes nachschieben -> YES-Struktur auslassen.
+        yes_complete = not any(m.neg_risk_augmented for m in markets)
         yes_cost = sum(a.price for _, a in yes_asks)
-        yes_fees = fee_rate * sum(a.price * (1 - a.price) for _, a in yes_asks)
+        yes_fees = sum(
+            self.fee_rate(snap, m.yes_token) * a.price * (1 - a.price)
+            for m, a in yes_asks
+        )
         edge = 1.0 - yes_cost - yes_fees
-        if edge >= min_edge:
-            size = min(min(a.size for _, a in yes_asks), max_order / max(yes_cost, 1e-9))
+        if yes_complete and edge >= min_edge:
+            # Gebühren im Nenner: realer Cash-Abfluss <= max_order_usdc
+            size = min(min(a.size for _, a in yes_asks),
+                       max_order / max(yes_cost + yes_fees, 1e-9))
             if size >= 5:
                 log.info("NegRisk-Arb (YES) in '%s': Kosten %.3f, Edge %.3f, Größe %.0f",
                          slug, yes_cost, edge, size)
@@ -68,12 +78,17 @@ class NegRiskArb(Strategy):
                         neg_risk=True,
                     ))
 
-        # Struktur 2: alle NO kaufen
+        # Struktur 2: alle NO kaufen (auch bei negRiskAugmented risikofrei:
+        # gewinnt ein später hinzugefügtes Outcome, zahlen sogar alle n NO aus)
         no_cost = sum(a.price for _, a in no_asks)
-        no_fees = fee_rate * sum(a.price * (1 - a.price) for _, a in no_asks)
+        no_fees = sum(
+            self.fee_rate(snap, m.no_token) * a.price * (1 - a.price)
+            for m, a in no_asks
+        )
         edge_no = (n - 1) - no_cost - no_fees
         if edge_no >= min_edge:
-            size = min(min(a.size for _, a in no_asks), max_order / max(no_cost, 1e-9))
+            size = min(min(a.size for _, a in no_asks),
+                       max_order / max(no_cost + no_fees, 1e-9))
             if size >= 5:
                 log.info("NegRisk-Arb (NO) in '%s': Kosten %.3f, Auszahlung %d, Edge %.3f, Größe %.0f",
                          slug, no_cost, n - 1, edge_no, size)

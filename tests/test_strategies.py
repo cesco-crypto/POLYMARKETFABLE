@@ -1,15 +1,19 @@
+import pytest
+
 from polybot.config import BotConfig
 from polybot.data.gamma import Market
 from polybot.data.orderbook import Level, OrderBook
-from polybot.strategies import ComplementArb, NegRiskArb
+from polybot.portfolio import Fill, Portfolio
+from polybot.strategies import ComplementArb, MarketMaking, NegRiskArb
 from polybot.strategies.base import MarketSnapshot
 
 
-def mk_market(i: int, neg_risk: bool = False) -> Market:
+def mk_market(i: int, neg_risk: bool = False, augmented: bool = False) -> Market:
     return Market(
         condition_id=f"cond{i}", question=f"Frage {i}?", slug=f"frage-{i}",
         yes_token=f"yes{i}", no_token=f"no{i}",
         liquidity=50_000, volume_24h=20_000, neg_risk=neg_risk,
+        neg_risk_augmented=augmented,
     )
 
 
@@ -102,3 +106,150 @@ def test_negrisk_arb_faires_event_kein_signal():
         books[f"no{i}"] = mk_book(f"no{i}", 0.50)     # Summe exakt 1.00 = n-1
     snap = MarketSnapshot(negrisk_events={"event-a": markets}, books=books)
     assert NegRiskArb(BotConfig()).generate(snap) == []
+
+
+# ---- Regressionstests: kategorieabhängige Taker-Gebühren ------------------
+
+def test_complement_arb_nutzt_tokenspezifische_fee_rate():
+    # Krypto-Rate 0.07 macht die scheinbare Edge negativ; ohne Gebühren
+    # (Geopolitik, Rate 0.00) ist derselbe Preis ein echter Arb.
+    m = mk_market(1)
+    books = {"yes1": mk_book("yes1", 0.55), "no1": mk_book("no1", 0.44)}
+    snap = MarketSnapshot(markets=[m], books=books,
+                          fee_rates={"yes1": 0.07, "no1": 0.07})
+    assert ComplementArb(BotConfig()).generate(snap) == []
+    snap.fee_rates = {"yes1": 0.0, "no1": 0.0}
+    assert len(ComplementArb(BotConfig()).generate(snap)) == 2
+
+
+def test_complement_arb_fallback_fee_rate_ist_maximum():
+    # Ohne tokenspezifische Rate muss der konservative Fallback (0.07,
+    # Kategorien-Maximum) greifen — nicht ein zu niedriger Pauschalsatz.
+    assert BotConfig().risk.taker_fee_rate == pytest.approx(0.07)
+
+
+def test_negrisk_arb_krypto_fee_verhindert_scheinbaren_arb():
+    # Szenario aus dem Fee-Finding: n=5, alle YES-Asks 0.1898 (Kosten 0.949).
+    # Mit Krypto-Rate 0.07 ist die echte Edge negativ -> kein Trade;
+    # mit Rate 0.05 wäre die (falsche) Edge 0.0125 gewesen.
+    markets = [mk_market(i, neg_risk=True) for i in range(5)]
+    books = {}
+    for i in range(5):
+        books[f"yes{i}"] = mk_book(f"yes{i}", 0.1898)
+        books[f"no{i}"] = mk_book(f"no{i}", 0.90)   # kein NO-Arb
+    fee_rates = {t: 0.07 for t in books}
+    snap = MarketSnapshot(negrisk_events={"ev": markets}, books=books, fee_rates=fee_rates)
+    assert NegRiskArb(BotConfig()).generate(snap) == []
+    snap.fee_rates = {t: 0.05 for t in books}
+    assert len(NegRiskArb(BotConfig()).generate(snap)) == 5
+
+
+# ---- Regressionstest: Größe inkl. Gebühren <= max_order_usdc --------------
+
+def test_complement_arb_groesse_inklusive_gebuehren():
+    cfg = BotConfig()
+    cfg.risk.max_order_usdc = 10.0
+    m = mk_market(1)
+    snap = MarketSnapshot(
+        markets=[m],
+        books={"yes1": mk_book("yes1", 0.50, ask_size=1000),
+               "no1": mk_book("no1", 0.40, ask_size=1000)},
+    )
+    signals = ComplementArb(cfg).generate(snap)
+    assert signals
+    cost = 0.90
+    fees = 0.07 * (0.50 * 0.50 + 0.40 * 0.60)
+    # realer Cash-Abfluss (Paarkosten + Gebühren) bleibt unter dem Limit
+    assert signals[0].size * (cost + fees) <= 10.0 + 1e-6
+    assert signals[0].size == pytest.approx(10.0 / (cost + fees))
+
+
+def test_negrisk_arb_groesse_inklusive_gebuehren():
+    cfg = BotConfig()
+    cfg.risk.max_order_usdc = 20.0
+    markets = [mk_market(i, neg_risk=True) for i in range(3)]
+    books = {}
+    for i in range(3):
+        books[f"yes{i}"] = mk_book(f"yes{i}", 0.30, ask_size=1000)
+        books[f"no{i}"] = mk_book(f"no{i}", 0.90)
+    snap = MarketSnapshot(negrisk_events={"ev": markets}, books=books)
+    yes_signals = [s for s in NegRiskArb(cfg).generate(snap) if s.token_id.startswith("yes")]
+    assert yes_signals
+    yes_cost = 3 * 0.30
+    yes_fees = 0.07 * 3 * 0.30 * 0.70
+    assert yes_signals[0].size * (yes_cost + yes_fees) <= 20.0 + 1e-6
+
+
+# ---- Regressionstest: negRiskAugmented -> YES-Struktur nicht risikofrei ----
+
+def test_negrisk_arb_augmented_event_keine_yes_struktur():
+    markets = [mk_market(i, neg_risk=True, augmented=True) for i in range(3)]
+    books = {}
+    for i in range(3):
+        books[f"yes{i}"] = mk_book(f"yes{i}", 0.30)  # Summe 0.90 -> YES-Arb-Optik
+        books[f"no{i}"] = mk_book(f"no{i}", 0.55)    # Summe 1.65 < 2 -> echter NO-Arb
+    snap = MarketSnapshot(negrisk_events={"ev": markets}, books=books)
+    signals = NegRiskArb(BotConfig()).generate(snap)
+    # YES-Struktur unterdrückt (Outcomes können nachträglich hinzukommen) ...
+    assert [s for s in signals if s.token_id.startswith("yes")] == []
+    # ... die NO-Struktur bleibt handelbar (Auszahlung >= n-1 garantiert)
+    assert len([s for s in signals if s.token_id.startswith("no")]) == 3
+
+
+# ---- Regressionstest: keine doppelt verplante Liquidität -------------------
+
+def test_complement_arb_ueberspringt_negrisk_teilmaerkte():
+    # Markt ist zugleich NegRisk-Teilmarkt im Snapshot -> complement_arb
+    # muss ihn auslassen, sonst verplanen beide Strategien denselben Ask.
+    m = mk_market(1, neg_risk=True)
+    books = {"yes1": mk_book("yes1", 0.55), "no1": mk_book("no1", 0.40)}
+    snap = MarketSnapshot(markets=[m], books=books,
+                          negrisk_events={"ev": [m, mk_market(2, neg_risk=True)]})
+    assert ComplementArb(BotConfig()).generate(snap) == []
+    # ohne NegRisk-Zugehörigkeit wird derselbe Markt gehandelt
+    snap.negrisk_events = {}
+    assert len(ComplementArb(BotConfig()).generate(snap)) == 2
+
+
+# ---- Regressionstests: Market Making (Inventar & kein Naked Short) --------
+
+def mm_snapshot(portfolio: Portfolio | None) -> MarketSnapshot:
+    m = mk_market(1)
+    book = OrderBook(token_id="yes1",
+                     bids=[Level(0.48, 500)], asks=[Level(0.52, 500)])
+    return MarketSnapshot(markets=[m], books={"yes1": book}, portfolio=portfolio)
+
+
+def test_mm_kein_sell_ohne_bestand():
+    snap = mm_snapshot(Portfolio())
+    signals = MarketMaking(BotConfig()).generate(snap)
+    assert [s.side for s in signals] == ["BUY"]  # kein Naked Short
+
+
+def test_mm_sell_nur_bis_bestand():
+    pf = Portfolio()
+    pf.apply_fill(Fill(ts=0, token_id="yes1", side="BUY", price=0.50, size=10, reason=""))
+    signals = MarketMaking(BotConfig()).generate(mm_snapshot(pf))
+    sells = [s for s in signals if s.side == "SELL"]
+    assert len(sells) == 1
+    assert sells[0].size <= 10 + 1e-9
+
+
+def test_mm_inventar_limit_stoppt_buy():
+    cfg = BotConfig()
+    pf = Portfolio()
+    # Exposure = 100 USDC = mm_max_inventory_usdc -> kein weiterer BUY
+    pf.apply_fill(Fill(ts=0, token_id="yes1", side="BUY", price=0.50,
+                       size=cfg.strategy.mm_max_inventory_usdc / 0.50, reason=""))
+    signals = MarketMaking(cfg).generate(mm_snapshot(pf))
+    assert [s for s in signals if s.side == "BUY"] == []
+    # verkaufen darf sie weiterhin (Inventar abbauen)
+    assert [s for s in signals if s.side == "SELL"]
+
+
+def test_mm_quotes_tragen_replace_flag():
+    # replace=True signalisiert dem LiveBroker, Alt-Quotes vorher zu canceln
+    pf = Portfolio()
+    pf.apply_fill(Fill(ts=0, token_id="yes1", side="BUY", price=0.50, size=10, reason=""))
+    signals = MarketMaking(BotConfig()).generate(mm_snapshot(pf))
+    assert signals and all(s.replace for s in signals)

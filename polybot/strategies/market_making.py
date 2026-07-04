@@ -6,6 +6,10 @@ Deshalb: enge Inventar-Limits und nur liquide Märkte mit stabilem Spread.
 
 Diese Strategie ist bewusst konservativ und standardmäßig deaktiviert —
 zuerst im Paper-Modus beobachten.
+
+Order-Lifecycle: Die Quotes tragen replace=True — der LiveBroker cancelt
+vor dem Neu-Quoten die zuvor platzierten Orders desselben Tokens, damit
+sich keine veralteten GTC-Quotes im Buch stapeln.
 """
 
 from __future__ import annotations
@@ -40,12 +44,27 @@ class MarketMaking(Strategy):
             ask_px = round(mid + s.mm_spread, 3)
             size = s.mm_size_usdc / max(mid, 0.05)
 
-            signals.append(Signal(
-                token_id=m.yes_token, side="BUY", price=bid_px, size=size,
-                reason="MM Bid", market_question=m.question,
-            ))
-            signals.append(Signal(
-                token_id=m.yes_token, side="SELL", price=ask_px, size=size,
-                reason="MM Ask", market_question=m.question,
-            ))
+            pf = snap.portfolio
+            held = pf.positions.get(m.yes_token) if pf else None
+            held_shares = held.shares if held else 0.0
+
+            # Inventar-Limit: Bid nur, solange gebundenes Kapital im Markt
+            # unter mm_max_inventory_usdc bleibt; sonst kappen bzw. auslassen.
+            exposure = pf.exposure(m.yes_token) if pf else 0.0
+            room = s.mm_max_inventory_usdc - exposure
+            bid_size = min(size, room / max(bid_px, 1e-9))
+            if bid_size >= 5:
+                signals.append(Signal(
+                    token_id=m.yes_token, side="BUY", price=bid_px, size=bid_size,
+                    reason="MM Bid", market_question=m.question, replace=True,
+                ))
+
+            # Ask nur gegen tatsächlich gehaltene Shares — Polymarket erlaubt
+            # kein Shorting, und ein ungedeckter Paper-SELL wäre Phantom-Gewinn.
+            ask_size = min(size, held_shares)
+            if ask_size >= 5:
+                signals.append(Signal(
+                    token_id=m.yes_token, side="SELL", price=ask_px, size=ask_size,
+                    reason="MM Ask", market_question=m.question, replace=True,
+                ))
         return signals

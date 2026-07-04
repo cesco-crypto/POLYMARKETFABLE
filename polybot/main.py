@@ -42,19 +42,29 @@ def build_snapshot(cfg: BotConfig, gamma: GammaClient, books: BookClient) -> Mar
             token_ids.update((m.yes_token, m.no_token))
 
     book_map = books.get_books(list(token_ids))
-    return MarketSnapshot(markets=markets, books=book_map, negrisk_events=negrisk)
+    # Tokenspezifische Taker-Fee-Raten (kategorieabhängig); nicht abrufbare
+    # Tokens fehlen im Dict und fallen auf cfg.risk.taker_fee_rate zurück.
+    fee_rates = books.get_fee_rates(list(token_ids))
+    return MarketSnapshot(markets=markets, books=book_map, negrisk_events=negrisk,
+                          fee_rates=fee_rates)
 
 
 def tick(cfg: BotConfig, snap: MarketSnapshot, strategies, risk: RiskManager,
          broker, portfolio: Portfolio) -> int:
+    snap.portfolio = portfolio  # Inventar-Sicht für Strategien (Market Making)
+    # Marks (Midpoints) für den Kill-Switch: ohne sie wären unrealisierte
+    # Verluste unsichtbar. Prüfung VOR der Ausführung, damit im Breach-Tick
+    # keine neuen Orders mehr rausgehen — und danach noch einmal.
+    marks = {t: b.midpoint for t, b in snap.books.items() if b.midpoint}
+    risk.check_daily_loss(portfolio, marks)
     signals = []
     for strat in strategies:
         signals.extend(strat.generate(snap))
     approved = risk.filter(signals, portfolio)
     if signals and not approved:
         log.debug("%d Signale erzeugt, alle vom Risk-Manager abgelehnt", len(signals))
-    fills = broker.execute(approved, snap.books, portfolio)
-    risk.check_daily_loss(portfolio)
+    fills = broker.execute(approved, snap.books, portfolio, snap.fee_rates)
+    risk.check_daily_loss(portfolio, marks)
     return fills
 
 

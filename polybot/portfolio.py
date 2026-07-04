@@ -3,9 +3,22 @@
 from __future__ import annotations
 
 import json
-import time
+import logging
+import os
 from dataclasses import dataclass, field, asdict
+from datetime import datetime, timezone
 from pathlib import Path
+
+log = logging.getLogger(__name__)
+
+# Fill-Historie: vollständiger Audit-Trail landet append-only in einer
+# JSONL-Datei; im RAM und im State-JSON werden nur die letzten N gehalten.
+MAX_FILLS_IN_STATE = 500
+
+
+def _utc_today() -> str:
+    """Aktuelles UTC-Kalenderdatum als ISO-String (Tagesgrenze für PnL)."""
+    return datetime.now(timezone.utc).date().isoformat()
 
 
 @dataclass
@@ -24,6 +37,7 @@ class Fill:
     price: float
     size: float
     reason: str
+    fee: float = 0.0  # Taker-Gebühr in USDC (Maker zahlen 0)
 
 
 @dataclass
@@ -32,8 +46,17 @@ class Portfolio:
     positions: dict[str, Position] = field(default_factory=dict)
     fills: list[Fill] = field(default_factory=list)
     realized_pnl: float = 0.0
-    day_start_ts: float = field(default_factory=lambda: time.time())
-    day_start_value: float = 1000.0
+    day_start_date: str = field(default_factory=_utc_today)  # UTC-Kalendertag
+    # None = "beim Start setzen": wird in __post_init__ an den tatsächlichen
+    # Startwert gekoppelt, damit Portfolio(cash=X) nicht sofort PnL zeigt.
+    day_start_value: float | None = None
+    # Wie viele Einträge aus self.fills schon in die JSONL-Datei geschrieben
+    # wurden (nicht persistiert, nur für save()).
+    _fills_flushed: int = field(default=0, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.day_start_value is None:
+            self.day_start_value = self.value()
 
     def exposure(self, token_id: str) -> float:
         pos = self.positions.get(token_id)
@@ -43,19 +66,41 @@ class Portfolio:
         return sum(p.cost_basis for p in self.positions.values())
 
     def apply_fill(self, fill: Fill) -> None:
-        self.fills.append(fill)
         pos = self.positions.setdefault(fill.token_id, Position(token_id=fill.token_id))
+        if fill.side != "BUY" and fill.size > pos.shares + 1e-9:
+            # Verkauf über den Bestand hinaus würde Phantom-Gewinn buchen
+            # (avg_cost=0) und die negative Position still verwerfen.
+            if pos.shares <= 1e-9:
+                self.positions.pop(fill.token_id, None)
+            raise ValueError(
+                f"Verkauf über Bestand: {fill.size:.2f} > {pos.shares:.2f} Shares "
+                f"({fill.token_id[:16]})"
+            )
+        if fill.side == "BUY":
+            cost = fill.price * fill.size + fill.fee
+            if cost > self.cash + 1e-6:
+                # Polymarket kennt keine Margin — ein BUY ohne Deckung würde
+                # die Paper-Buchhaltung von der Realität entkoppeln.
+                if pos.shares <= 1e-9:
+                    self.positions.pop(fill.token_id, None)
+                raise ValueError(
+                    f"Unzureichendes Cash: Kauf kostet {cost:.2f} USDC, "
+                    f"verfügbar {self.cash:.2f} ({fill.token_id[:16]})"
+                )
+        self.fills.append(fill)
         if fill.side == "BUY":
             pos.shares += fill.size
             pos.cost_basis += fill.price * fill.size
-            self.cash -= fill.price * fill.size
+            self.cash -= fill.price * fill.size + fill.fee
         else:
             avg_cost = pos.cost_basis / pos.shares if pos.shares > 0 else 0.0
             sold_cost = avg_cost * fill.size
             self.realized_pnl += fill.price * fill.size - sold_cost
             pos.shares -= fill.size
             pos.cost_basis -= sold_cost
-            self.cash += fill.price * fill.size
+            self.cash += fill.price * fill.size - fill.fee
+        # Gebühren sind in jedem Fall realisierte Kosten
+        self.realized_pnl -= fill.fee
         if pos.shares <= 1e-9:
             self.positions.pop(fill.token_id, None)
 
@@ -63,31 +108,55 @@ class Portfolio:
         """Cash + Positionen (zu Marktpreisen, sonst zu Einstandskosten)."""
         v = self.cash
         for p in self.positions.values():
-            if marks and p.token_id in marks:
+            if marks is None:
+                v += p.cost_basis
+            elif p.token_id in marks:
                 v += p.shares * marks[p.token_id]
             else:
+                # Fehlender Mark (Book-Fetch gescheitert, Markt delistet):
+                # Fallback auf Einstandskosten schönt den Wert — laut warnen.
+                log.warning("Kein Mark für %s — bewerte zu Einstandskosten "
+                            "(%.2f USDC)", p.token_id[:16], p.cost_basis)
                 v += p.cost_basis
         return v
 
     def daily_pnl(self, marks: dict[str, float] | None = None) -> float:
         # neuer Kalendertag (UTC) -> Basis zurücksetzen
-        if time.time() - self.day_start_ts > 86_400:
-            self.day_start_ts = time.time()
-            self.day_start_value = self.value(marks)
-        return self.value(marks) - self.day_start_value
+        v = self.value(marks)
+        today = _utc_today()
+        if today != self.day_start_date:
+            self.day_start_date = today
+            self.day_start_value = v
+        return v - self.day_start_value
 
     # ---- Persistenz -------------------------------------------------------
 
     def save(self, path: str | Path = "paper_state.json") -> None:
+        path = Path(path)
+        # Audit-Trail: neue Fills append-only in eine JSONL-Datei schreiben,
+        # bevor die In-Memory-Historie gekappt wird.
+        new_fills = self.fills[self._fills_flushed:]
+        if new_fills:
+            with path.with_suffix(".fills.jsonl").open("a") as fh:
+                for f in new_fills:
+                    fh.write(json.dumps(asdict(f)) + "\n")
+        if len(self.fills) > MAX_FILLS_IN_STATE:
+            self.fills = self.fills[-MAX_FILLS_IN_STATE:]
+        self._fills_flushed = len(self.fills)
+
         data = {
             "cash": self.cash,
             "realized_pnl": self.realized_pnl,
-            "day_start_ts": self.day_start_ts,
+            "day_start_date": self.day_start_date,
             "day_start_value": self.day_start_value,
             "positions": {k: asdict(v) for k, v in self.positions.items()},
-            "fills": [asdict(f) for f in self.fills[-500:]],
+            "fills": [asdict(f) for f in self.fills],
         }
-        Path(path).write_text(json.dumps(data, indent=2))
+        # Atomar schreiben: erst in Temp-Datei, dann os.replace — ein Crash
+        # mitten im Schreiben darf den State nicht zerstören.
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2))
+        os.replace(tmp, path)
 
     @classmethod
     def load(cls, path: str | Path = "paper_state.json", start_cash: float = 1000.0) -> "Portfolio":
@@ -95,12 +164,21 @@ class Portfolio:
         if not p.exists():
             return cls(cash=start_cash, day_start_value=start_cash)
         data = json.loads(p.read_text())
+        day_start_date = data.get("day_start_date")
+        if not day_start_date:
+            # Altes State-Format: Timestamp -> UTC-Datum umrechnen
+            ts = data.get("day_start_ts")
+            day_start_date = (
+                datetime.fromtimestamp(ts, tz=timezone.utc).date().isoformat()
+                if ts else _utc_today()
+            )
         pf = cls(
             cash=data["cash"],
             realized_pnl=data.get("realized_pnl", 0.0),
-            day_start_ts=data.get("day_start_ts", time.time()),
+            day_start_date=day_start_date,
             day_start_value=data.get("day_start_value", start_cash),
         )
         pf.positions = {k: Position(**v) for k, v in data.get("positions", {}).items()}
         pf.fills = [Fill(**f) for f in data.get("fills", [])]
+        pf._fills_flushed = len(pf.fills)  # geladene Fills stehen schon auf Disk
         return pf

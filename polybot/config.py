@@ -27,8 +27,11 @@ class RiskConfig:
     daily_loss_limit_usdc: float = 100.0  # Kill-Switch: Tagesverlustgrenze
     min_edge: float = 0.01                # min. Edge (1 Cent) nach Gebühren
     # Taker-Gebühr (seit März 2026): fee = rate * p * (1-p) pro Share.
-    # Kategorieabhängig 0.00-0.07; 0.05 ist eine konservative Annahme.
-    taker_fee_rate: float = 0.05
+    # Kategorieabhängig 0.00-0.07. Die Strategien nutzen die tokenspezifische
+    # Rate vom CLOB (/fee-rate); dieser Wert ist nur der Fallback, wenn sie
+    # nicht abrufbar ist — deshalb das echte Maximum 0.07 (Krypto), damit
+    # eine unbekannte Rate die Edge nie überschätzt.
+    taker_fee_rate: float = 0.07
 
 
 @dataclass

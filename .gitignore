@@ -17,9 +17,11 @@ build/
 .mypy_cache/
 .ruff_cache/
 
-# Laufzeitdaten
-data/
-logs/
+# Laufzeitdaten (nur im Repo-Root — polybot/data/ ist Quellcode!)
+/data/
+/logs/
 *.sqlite
 *.db
 paper_state.json
+paper_state.fills.jsonl
+paper_state.tmp
