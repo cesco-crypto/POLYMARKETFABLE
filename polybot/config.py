@@ -67,6 +67,10 @@ class StrategyConfig:
     # Mindestgröße einer Order in Shares (Polymarket-Minimum ist meist 5);
     # Signale unterhalb dieser Größe werden von den Strategien verworfen.
     min_order_shares: float = 5.0
+    # Mindest-Restlaufzeit eines Marktes in Sekunden. Nach endDate bleiben
+    # Bücher stale und untradeable (Validierungs-Befund 04.07.2026) — und
+    # kurz vor dem Ende ist das Auflösungs-/Reject-Risiko am höchsten.
+    min_time_to_end_s: float = 120.0
     # negRisk-Auswahl: ohne Deckel würden die Orderbücher ALLER Events geladen
     # (live gemessen ~70 Events / ~5000 Tokens -> ein Tick dauert länger als
     # poll_interval_s). Nur die Top-N Events nach Summen-Liquidität behalten;

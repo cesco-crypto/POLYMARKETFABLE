@@ -111,7 +111,16 @@ def build_snapshot(cfg: BotConfig, gamma: GammaClient, books: BookClient,
         markets = gamma.active_markets(min_liquidity=s.min_liquidity_usdc,
                                        limit=s.max_markets * 2)
         markets = [m for m in markets if m.volume_24h >= s.min_volume_24h_usdc][: s.max_markets]
+    # Endzeit-Filter (Trade-Print-Validierung 04.07.2026): Märkte behalten
+    # nach endDate closed=False und ein stales, real nicht handelbares Buch
+    # (abgelaufene 15-Min-Krypto-Fenster, beendete Spiele) — ohne diesen
+    # Filter entstehen Phantom-Arbitragen im Paper-PnL und Live-Rejects.
+    markets = [m for m in markets if m.tradeable(s.min_time_to_end_s)]
     negrisk = gamma.negrisk_events(min_liquidity=s.min_liquidity_usdc)
+    # Ein Event ist nur handelbar, wenn ALLE Teilmärkte noch laufen —
+    # sonst wäre das Bündel unvollständig.
+    negrisk = {slug: ms for slug, ms in negrisk.items()
+               if all(m.tradeable(s.min_time_to_end_s) for m in ms)}
     # Ohne Deckel würden die Bücher ALLER negRisk-Teilmärkte geladen (live
     # ~5000 Tokens -> ein Tick dauert länger als poll_interval_s): Events mit
     # zu vielen Teilmärkten überspringen (dort fehlt fast immer ein Buch und

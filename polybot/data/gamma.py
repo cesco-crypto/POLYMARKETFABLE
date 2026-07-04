@@ -9,6 +9,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime
 
 import requests
 
@@ -38,6 +39,19 @@ class Market:
     # None = Gamma lieferte keine Fee-Info -> Aufrufer nutzen den
     # konfigurierten Fallback (cfg.risk.taker_fee_rate).
     fee_rate: float | None = None
+    # Marktende (endDate) als Unix-Timestamp; None = unbekannt.
+    # Trade-Print-Validierung vom 04.07.2026: Märkte behalten nach endDate
+    # (Spielende, abgelaufene 15-Min-Krypto-Fenster) noch closed=False und
+    # ein STALES Orderbuch — dort ist real nichts mehr handelbar. Ohne
+    # Endzeit-Filter entstehen Phantom-Arbitragen (12%+ des Fill-Volumens
+    # im ersten Messlauf).
+    end_ts: float | None = None
+
+    def tradeable(self, min_time_to_end_s: float, now: float | None = None) -> bool:
+        """Bleibt bis zum Marktende genug Zeit, um real zu handeln?"""
+        if self.end_ts is None:
+            return True  # kein endDate geliefert -> nicht aussortieren
+        return self.end_ts - (now if now is not None else time.time()) > min_time_to_end_s
 
 
 def _parse_fee_rate(m: dict) -> float | None:
@@ -62,6 +76,17 @@ def _parse_fee_rate(m: dict) -> float | None:
     return rate if 0.0 <= rate <= 1.0 else None
 
 
+def _parse_end_ts(m: dict) -> float | None:
+    """endDate (ISO-8601, z.B. '2026-07-04T21:00:00Z') als Unix-Timestamp."""
+    raw = m.get("endDate") or m.get("endDateIso")
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
 def _parse_market(m: dict) -> Market | None:
     try:
         token_ids = json.loads(m.get("clobTokenIds") or "[]")
@@ -79,6 +104,7 @@ def _parse_market(m: dict) -> Market | None:
             closed=bool(m.get("closed", False)),
             neg_risk_augmented=bool(m.get("negRiskAugmented", False)),
             fee_rate=_parse_fee_rate(m),
+            end_ts=_parse_end_ts(m),
         )
     except (ValueError, TypeError, json.JSONDecodeError):
         return None
