@@ -554,9 +554,99 @@ def cmd_report(cfg: BotConfig, target: float = 1000.0,
                   f"Gebühren {pf.fees_paid:.2f} | Fills {len(pf.fills)}")
 
 
+def cmd_cycle_report(cfg: BotConfig, now: float | None = None,
+                     opps_path: str = "data/opportunities.jsonl",
+                     ledger_path: str | Path = cycle_report.DEFAULT_LEDGER_PATH,
+                     state_path: str = "paper_state.json",
+                     json_path: str | Path = cycle_report.DEFAULT_REPORT_PATH) -> dict:
+    """Zyklus-Selbstauswertung: eine Bildschirmseite + data/cycle_report.json.
+
+    Kombiniert PnL-Ledger (Fenster-Deltas/Raten), Opportunity-Log (Dichte
+    nach kind) und Paper-State (Totale) — gedacht für die schnelle Iteration
+    zwischen den 90-Minuten-Zyklen des Messbots. Rückgabe: das Report-Dict
+    (identisch zum geschriebenen JSON).
+    """
+    now = time.time() if now is None else now
+    rows = cycle_report.load_ledger(ledger_path)
+    opps = load_opportunities(opps_path)
+    pf = Portfolio.load(state_path, start_cash=cfg.risk.paper_start_cash)
+    report = cycle_report.build_report(cfg, now, rows, opps, pf)
+
+    # JSON-Ausgabe für spätere Auswertung — Schreibfehler nur warnen, die
+    # Konsolen-Ausgabe soll trotzdem kommen.
+    out = Path(json_path)
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(report, indent=2))
+    except OSError as e:
+        log.warning("Cycle-Report-JSON %s nicht schreibbar: %s", out, e)
+
+    # ---- Kompakte Konsolen-Ausgabe (eine Bildschirmseite) ------------------
+    labels = {"1h": "1h", "3h": "3h", "today": "heute", "process": "Prozess"}
+    w = report["windows"]
+
+    def money_line(name: str) -> str:
+        win = w[name]
+        return (f"PnL {win['pnl']:+.2f} | Gebühren {win['fees']:.2f} | "
+                f"Rebates {win['rebates']:.2f} USDC")
+
+    console.print(f"[bold]Cycle-Report[/bold] {report['generated_at_iso']} "
+                  f"(Ledger: {len(rows)} Zeilen | Opportunities: {len(opps)})")
+    console.print(f"[bold]Heute (UTC):[/bold]        {money_line('today')}")
+    if "process" in w:
+        console.print(f"[bold]Seit Prozessstart:[/bold]  {money_line('process')} "
+                      f"({w['process']['hours_covered']:.2f} h)")
+    else:
+        console.print("[yellow]Kein Prozessstart im Ledger — 'seit Prozessstart' "
+                      "entfällt (erst 'python -m polybot.main run' laufen "
+                      "lassen).[/yellow]")
+    console.print("[bold]Rate:[/bold] " + " | ".join(
+        f"{labels[n]} {w[n]['rate_per_h']:+.2f} USDC/h"
+        for n in ("1h", "3h", "today")))
+
+    window_names = [n for n in ("1h", "3h", "today", "process")
+                    if n in report["opportunities"]]
+    table = Table(title="Gelegenheiten (Anzahl theo_profit>0 / Summe theo_profit USDC)")
+    table.add_column("kind")
+    for n in window_names:
+        table.add_column(labels[n], justify="right")
+    kinds = list(cycle_report.OPP_KINDS) + sorted(
+        k for k in report["opportunities"]["today"] if k not in cycle_report.OPP_KINDS)
+    for k in kinds:
+        cells = [k]
+        for n in window_names:
+            agg = report["opportunities"][n].get(
+                k, {"n_pos": 0, "theo_profit": 0.0})
+            cells.append(f"{agg['n_pos']} / {agg['theo_profit']:.2f}")
+        table.add_row(*cells)
+    console.print(table)
+
+    top = report["top_markets_today"]
+    if top:
+        tt = Table(title="Top-Märkte heute (realisierter Merge-PnL)")
+        for col in ("Markt", "PnL (USDC)", "Sets", "Merges"):
+            tt.add_column(col, justify="right" if col != "Markt" else "left")
+        for m in top:
+            tt.add_row(m["market"][:60], f"{m['pnl']:+.2f}",
+                       f"{m['sets']:.1f}", f"{m['merges']}")
+        console.print(tt)
+    else:
+        console.print("Heute noch keine realisierten Merges.")
+
+    console.print(f"[bold]Engpass:[/bold] {report['bottleneck']['text']}")
+    tot = report["totals"]
+    console.print(f"[bold]Gesamt:[/bold] Cash {tot['cash']:.2f} | realisierter "
+                  f"PnL {tot['realized_pnl']:+.2f} | Gebühren {tot['fees_paid']:.2f} | "
+                  f"Rebates {tot['rebates_earned']:.2f} | Positionen {tot['positions']} | "
+                  f"Fills {tot['fills']}")
+    console.print(f"[dim]JSON: {out}[/dim]")
+    return report
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="polybot")
-    parser.add_argument("command", choices=["scan", "run", "status", "report"])
+    parser.add_argument("command",
+                        choices=["scan", "run", "status", "report", "cycle-report"])
     # default=None: BotConfig.load unterscheidet so zwischen explizit gesetztem
     # --config (Datei MUSS existieren) und implizitem config.yaml-Fallback.
     parser.add_argument("--config", default=None)
@@ -573,7 +663,8 @@ def main() -> None:
     if args.command == "report":
         cmd_report(cfg, target=args.target)
         return
-    {"scan": cmd_scan, "run": cmd_run, "status": cmd_status}[args.command](cfg)
+    {"scan": cmd_scan, "run": cmd_run, "status": cmd_status,
+     "cycle-report": cmd_cycle_report}[args.command](cfg)
 
 
 if __name__ == "__main__":

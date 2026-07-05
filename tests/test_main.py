@@ -124,6 +124,20 @@ def test_cmd_run_bricht_bei_leerer_strategieliste_ab(monkeypatch):
         main.cmd_run(cfg)
 
 
+class NullLedger:
+    """CycleLedger-Ersatz: cmd_run-Tests dürfen keinen echten PnL-Ledger
+    nach data/pnl_ledger.jsonl schreiben (würde reale Messdaten verfälschen)."""
+
+    def record_start(self, portfolio, ts=None):
+        pass
+
+    def record_tick(self, portfolio, ts=None):
+        pass
+
+    def record_merge(self, market, kind, sets, pnl, ts=None):
+        pass
+
+
 class FakeTime:
     """time-Ersatz: jeder time()-Aufruf springt 30s vor -> Tick-Überlauf."""
 
@@ -148,6 +162,7 @@ def test_cmd_run_warnt_bei_tick_ueberlauf_und_schlaeft_mindestens_1s(monkeypatch
     # der Sleep stillschweigend auf 0 — Busy-Loop gegen die API ohne Warnung.
     monkeypatch.setattr(main, "time", FakeTime())
     monkeypatch.setattr(main, "Portfolio", StubPortfolio)
+    monkeypatch.setattr(main, "CycleLedger", NullLedger)
     monkeypatch.setattr(main, "build_snapshot", lambda cfg, g, b: MarketSnapshot())
     monkeypatch.setattr(main, "tick", lambda *a, **kw: 0)
     cfg = BotConfig()  # poll_interval_s=10, Tick "dauert" 30s
