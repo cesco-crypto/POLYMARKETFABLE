@@ -1,5 +1,8 @@
 # v2-Client: Pflicht seit dem Polymarket-Exchange-Upgrade vom 28.04.2026
 py-clob-client-v2>=1.0.2
+# On-Chain-Merges im Live-Modus (polybot/onchain.py): der v2-Client bringt
+# kein web3 mit, die Contract-Calls (CTF/NegRisk Adapter) laufen über web3.py
+web3>=6.0.0
 requests>=2.31.0
 websocket-client>=1.7.0
 pyyaml>=6.0

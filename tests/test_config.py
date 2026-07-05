@@ -51,8 +51,16 @@ def test_impliziter_default_liest_config_yaml_im_cwd(tmp_path, monkeypatch):
     "risk:\n  max_order_usdc: -1\n",
     "risk:\n  taker_fee_rate: 0.5\n",  # weit über dem Polymarket-Maximum 0.07
     "risk:\n  taker_fee_rate: -0.01\n",
+    "strategy:\n  stream_event_window_s: -1\n",  # 0 = aus, negativ = Fehler
 ])
 def test_unsinnige_werte_werden_abgewiesen(tmp_path, yaml_text):
     p = write_config(tmp_path, yaml_text)
     with pytest.raises(SystemExit):
         BotConfig.load(p)
+
+
+def test_stream_event_window_default_und_yaml_ladbar(tmp_path):
+    # Ereignisfenster fürs WSS-Abo: Default 4h, per YAML änderbar (0 = aus).
+    assert BotConfig().strategy.stream_event_window_s == 4 * 3600.0
+    p = write_config(tmp_path, "strategy:\n  stream_event_window_s: 0\n")
+    assert BotConfig.load(p).strategy.stream_event_window_s == 0.0

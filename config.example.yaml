@@ -11,6 +11,8 @@ risk:
   max_total_exposure_usdc: 500
   daily_loss_limit_usdc: 100  # Kill-Switch
   min_edge: 0.01              # min. Arbitrage-Edge (1 Cent pro Share)
+  live_auto_merge: true       # Live: volle Paare/NO-Sätze on-chain zu pUSD
+                              # mergen (Kapital-Recycling; braucht POL für Gas)
 
 strategy:
   enabled:

@@ -258,6 +258,22 @@ def test_stream_tokens_negrisk_komplett_dann_maerkte_nach_volumen():
     assert main.stream_tokens(snap, cap=3) == ["yes2", "no2"]
 
 
+def test_stream_tokens_ereignisfenster_schlaegt_volumen():
+    # Märkte im Ereignisfenster (endDate nah -> Live-Ereignis läuft) kommen
+    # vor volumenstärkeren Dauerläufern ins Abo — dort ballen sich die
+    # Preisverwerfungen, und das Abo-Budget ist der Engpass.
+    now = 1_000_000.0
+    m_vol, m_live, m_fern = market(1, volume_24h=99_000), market(2, volume_24h=100), market(3, volume_24h=50_000)
+    m_live.end_ts = now + 3_600       # endet in 1h -> im 4h-Fenster
+    m_fern.end_ts = now + 40 * 3_600  # endet in 40h -> außerhalb
+    snap = MarketSnapshot(markets=[m_vol, m_live, m_fern])
+    toks = main.stream_tokens(snap, cap=6, event_window_s=4 * 3_600, now=now)
+    assert toks == ["yes2", "no2", "yes1", "no1", "yes3", "no3"]
+    # Fenster aus (0): reine Volumen-Sortierung wie bisher.
+    toks = main.stream_tokens(snap, cap=6, event_window_s=0.0, now=now)
+    assert toks == ["yes1", "no1", "yes3", "no3", "yes2", "no2"]
+
+
 class FakeStreamer:
     def __init__(self, books_seq):
         self.books_seq = list(books_seq)  # eine Antwort pro Aufruf

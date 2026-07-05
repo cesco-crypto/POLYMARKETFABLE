@@ -141,10 +141,65 @@ def test_negrisk_augmented_laesst_yes_struktur_aus():
 
 
 def test_unvollstaendiges_negrisk_event_wird_ausgelassen():
+    # Nur EIN NO-Bein verfügbar -> weder Voll- noch Teilmengen-Struktur.
     ms = [mk_market(1, neg_risk=True), mk_market(2, neg_risk=True)]
     books = {"yes1": mk_book("yes1", 0.10), "no1": mk_book("no1", 0.10)}  # Markt 2 fehlt
     snap = MarketSnapshot(negrisk_events={"ev": ms}, books=books)
     assert find_opportunities(cfg_ohne_gebuehren(), snap) == []
+
+
+def test_negrisk_partial_no_misst_teilmengen_bei_unvollstaendigem_event():
+    # 2 von 3 NO-Beinen verfügbar: höchstens ein Outcome der Teilmenge kann
+    # gewinnen -> Auszahlung >= k-1 = 1. Kosten 0.40+0.45 = 0.85 -> Edge 0.15.
+    ms = [mk_market(i, neg_risk=True) for i in (1, 2, 3)]
+    books = {
+        "yes1": mk_book("yes1", 0.55, 10), "no1": mk_book("no1", 0.40, 30),
+        "yes2": mk_book("yes2", 0.60, 10), "no2": mk_book("no2", 0.45, 20),
+        # Markt 3: kein Buch -> Event unvollständig, negrisk_arb würde passen
+    }
+    snap = MarketSnapshot(negrisk_events={"ev": ms}, books=books)
+    opps = find_opportunities(cfg_ohne_gebuehren(), snap)
+    assert [o.kind for o in opps] == ["negrisk_partial_no"]
+    o = opps[0]
+    assert o.market == "ev [2/3 NO]"
+    assert o.gross == approx(0.85)
+    assert o.net_edge == approx(1.0 - 0.85)  # Auszahlung k-1 = 1
+    assert o.depth == 20
+    assert o.theo_profit == approx(0.15 * 20)
+    # Reine Messung: keine Strategie handelt das -> nie above_threshold.
+    assert o.above_threshold is False
+
+
+def test_negrisk_partial_no_auch_wenn_nur_ein_yes_buch_fehlt():
+    # Alle NO-Beine da, aber ein YES-Buch fehlt: negrisk_arb verlangt beide
+    # Seiten und passt — die Teilmengen-Messung umfasst dann alle n NO-Beine.
+    ms = [mk_market(1, neg_risk=True), mk_market(2, neg_risk=True)]
+    books = {
+        "no1": mk_book("no1", 0.30), "no2": mk_book("no2", 0.40),
+        "yes1": mk_book("yes1", 0.65),  # yes2 fehlt
+    }
+    snap = MarketSnapshot(negrisk_events={"ev": ms}, books=books)
+    opps = find_opportunities(cfg_ohne_gebuehren(), snap)
+    assert [o.kind for o in opps] == ["negrisk_partial_no"]
+    assert opps[0].market == "ev [2/2 NO]"
+    assert opps[0].net_edge == approx(1.0 - 0.70)
+
+
+def test_negrisk_partial_no_unter_edge_floor_bleibt_still():
+    # Fair bepreiste Teilmenge (Summe 1.20 >> Auszahlung 1) wäre nur Rauschen.
+    ms = [mk_market(i, neg_risk=True) for i in (1, 2, 3)]
+    books = {"no1": mk_book("no1", 0.60), "no2": mk_book("no2", 0.60)}
+    snap = MarketSnapshot(negrisk_events={"ev": ms}, books=books)
+    assert find_opportunities(cfg_ohne_gebuehren(), snap) == []
+
+
+def test_vollstaendiges_event_erzeugt_keine_partial_messung():
+    # Komplette Events gehören negrisk_yes/negrisk_no — kein Doppel-Logging.
+    ms = [mk_market(1, neg_risk=True), mk_market(2, neg_risk=True)]
+    books = {t: mk_book(t, 0.30) for t in ("yes1", "no1", "yes2", "no2")}
+    snap = MarketSnapshot(negrisk_events={"ev": ms}, books=books)
+    kinds = {o.kind for o in find_opportunities(cfg_ohne_gebuehren(), snap)}
+    assert kinds == {"negrisk_yes", "negrisk_no"}
 
 
 def test_complement_ueberspringt_negrisk_teilmaerkte():

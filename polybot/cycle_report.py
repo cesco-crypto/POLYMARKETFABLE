@@ -42,14 +42,17 @@ HEARTBEAT_S = 60.0
 MIN_RATE_HOURS = 0.01
 
 # Bekannte Opportunity-Arten des Recorders (feste Zeilenreihenfolge im Report).
-OPP_KINDS = ("complement", "negrisk_yes", "negrisk_no", "implication")
+OPP_KINDS = ("complement", "negrisk_yes", "negrisk_no", "negrisk_partial_no",
+             "implication")
 
 # Welche Strategie eine Opportunity-Art handeln würde — Arten ohne Strategie
-# (implication: reine Beobachtung) sind per Definition ungenutzter theo_profit.
+# (negrisk_partial_no, implication: reine Beobachtung) sind per Definition
+# ungenutzter theo_profit.
 KIND_STRATEGY = {
     "complement": "complement_arb",
     "negrisk_yes": "negrisk_arb",
     "negrisk_no": "negrisk_arb",
+    "negrisk_partial_no": None,
     "implication": None,
 }
 

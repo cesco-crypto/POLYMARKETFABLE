@@ -48,7 +48,8 @@ class Opportunity:
     """
 
     ts: float
-    kind: str            # "complement" | "negrisk_yes" | "negrisk_no" | "implication"
+    kind: str            # "complement" | "negrisk_yes" | "negrisk_no" |
+                         # "negrisk_partial_no" | "implication"
     market: str          # Marktfrage bzw. Event-Slug
     gross: float         # Brutto-Summe der besten Asks (Kosten pro Set)
     fees: float          # Taker-Gebühren pro Set (rate * p * (1-p) je Bein)
@@ -81,8 +82,13 @@ def find_opportunities(cfg: BotConfig, snap: MarketSnapshot,
         return snap.fee_rates.get(token_id, cfg.risk.taker_fee_rate)
 
     def add(kind: str, market: str, payout: float,
-            legs: list[tuple[str, float, float]]) -> None:
-        """legs: (token_id, ask_price, ask_size) je Bein."""
+            legs: list[tuple[str, float, float]],
+            has_strategy: bool = True) -> None:
+        """legs: (token_id, ask_price, ask_size) je Bein.
+
+        has_strategy=False: reine Beobachtung (keine Strategie handelt die
+        Art) — above_threshold bleibt dann immer False, wie bei implication.
+        """
         gross = sum(p for _, p, _ in legs)
         fees = sum(_fee(rate(t), p) for t, p, _ in legs)
         net_edge = payout - gross - fees
@@ -93,7 +99,8 @@ def find_opportunities(cfg: BotConfig, snap: MarketSnapshot,
             ts=ts, kind=kind, market=market, gross=gross, fees=fees,
             net_edge=net_edge, depth=depth,
             theo_profit=max(0.0, net_edge) * depth,
-            above_threshold=net_edge >= min_edge and depth >= min_shares,
+            above_threshold=(has_strategy and net_edge >= min_edge
+                             and depth >= min_shares),
         ))
 
     # Wie in complement_arb: negRisk-Teilmärkte auslassen — für die ist
@@ -116,20 +123,36 @@ def find_opportunities(cfg: BotConfig, snap: MarketSnapshot,
 
     for slug, markets in snap.negrisk_events.items():
         yes_legs, no_legs = [], []
+        complete = True
         for m in markets:
             yb, nb = snap.books.get(m.yes_token), snap.books.get(m.no_token)
-            if not yb or not yb.best_ask or not nb or not nb.best_ask:
-                yes_legs = no_legs = []  # unvollständiges Event -> auslassen
-                break
-            yes_legs.append((m.yes_token, yb.best_ask.price, yb.best_ask.size))
-            no_legs.append((m.no_token, nb.best_ask.price, nb.best_ask.size))
-        if not yes_legs:
-            continue
-        # YES-Struktur nur, wenn die Outcome-Menge garantiert vollständig
-        # bleibt (kein negRiskAugmented) — sonst keine echte Arbitrage.
-        if not any(m.neg_risk_augmented for m in markets):
-            add("negrisk_yes", slug, 1.0, yes_legs)
-        add("negrisk_no", slug, float(len(markets) - 1), no_legs)
+            ya = yb.best_ask if yb else None
+            na = nb.best_ask if nb else None
+            if ya is None or na is None:
+                complete = False
+            if ya is not None:
+                yes_legs.append((m.yes_token, ya.price, ya.size))
+            if na is not None:
+                no_legs.append((m.no_token, na.price, na.size))
+        if complete:
+            # YES-Struktur nur, wenn die Outcome-Menge garantiert vollständig
+            # bleibt (kein negRiskAugmented) — sonst keine echte Arbitrage.
+            if not any(m.neg_risk_augmented for m in markets):
+                add("negrisk_yes", slug, 1.0, yes_legs)
+            add("negrisk_no", slug, float(len(markets) - 1), no_legs)
+        elif len(no_legs) >= 2:
+            # Teilmengen-NO (NUR MESSUNG, keine Strategie handelt das):
+            # negrisk_arb verwirft unvollständige Events komplett — dabei ist
+            # "k NO von n sich ausschließenden Outcomes kaufen" auch für jede
+            # Teilmenge risikofrei: höchstens EIN Outcome der Teilmenge kann
+            # gewinnen, also zahlen mindestens k-1 NO-Beine je 1 USDC aus.
+            # (Auch bei negRiskAugmented; Realisierung liefe live über den
+            # NegRisk-Adapter-Convert, der zusätzlich die YES der übrigen
+            # Outcomes mintet — hier konservativ ignoriert.) Wie viel Profit
+            # in dieser Lücke steckt, misst kind='negrisk_partial_no'.
+            add("negrisk_partial_no",
+                f"{slug} [{len(no_legs)}/{len(markets)} NO]",
+                float(len(no_legs) - 1), no_legs, has_strategy=False)
 
     # Cross-Market-Implikationen (kind='implication'): reine Beobachtung —
     # der Detektor erzeugt nie Signale, above_threshold ist deshalb immer

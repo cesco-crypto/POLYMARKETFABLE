@@ -39,6 +39,10 @@ class Market:
     # None = Gamma lieferte keine Fee-Info -> Aufrufer nutzen den
     # konfigurierten Fallback (cfg.risk.taker_fee_rate).
     fee_rate: float | None = None
+    # NegRisk-questionId (0x…, 32 Bytes): letztes Byte = Frage-Index im
+    # Event, Rest = marketId — gebraucht für den on-chain NO-Satz-Convert
+    # über den NegRisk Adapter (polybot/onchain.py). Leer = unbekannt.
+    question_id: str = ""
     # Marktende (endDate) als Unix-Timestamp; None = unbekannt.
     # Trade-Print-Validierung vom 04.07.2026: Märkte behalten nach endDate
     # (Spielende, abgelaufene 15-Min-Krypto-Fenster) noch closed=False und
@@ -101,6 +105,7 @@ def _parse_market(m: dict) -> Market | None:
             liquidity=float(m.get("liquidityNum") or m.get("liquidity") or 0),
             volume_24h=float(m.get("volume24hr") or 0),
             neg_risk=bool(m.get("negRisk", False)),
+            question_id=str(m.get("questionID") or ""),
             closed=bool(m.get("closed", False)),
             neg_risk_augmented=bool(m.get("negRiskAugmented", False)),
             fee_rate=_parse_fee_rate(m),

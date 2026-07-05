@@ -173,6 +173,23 @@ def test_scan_all_mm_kandidaten_ergaenzen_arb_kandidaten():
     assert books.book_requests == [["no2", "yes1", "yes2"]]
 
 
+def test_candidate_tokens_teilmengen_no_bei_unvollstaendigem_negrisk_event():
+    # Unvollständige Events (Ask fehlt) verwirft negrisk_arb — für die
+    # Teilmengen-NO-Messung (negrisk_partial_no) brauchen die verfügbaren
+    # NO-Beine trotzdem volle Bücher, wenn ihre Summe < (k-1) + Puffer liegt.
+    ev = [market(1), market(2), market(3)]
+    asks = {"no1": 0.40, "no2": 0.45, "yes1": 0.62, "yes2": 0.58}  # Markt 3 ohne Asks
+    assert main._candidate_tokens([], {"ev": ev}, asks) == {"no1", "no2"}
+    # Summe 1.20 >= 1 + Puffer -> kein Kandidat; ebenso bei nur EINEM NO-Bein.
+    assert main._candidate_tokens([], {"ev": ev}, {"no1": 0.60, "no2": 0.60}) == set()
+    assert main._candidate_tokens([], {"ev": ev}, {"no1": 0.10}) == set()
+    # Vollständiges Event bleibt beim bisherigen Pfad (alle Tokens laden):
+    asks_voll = {f"{s}{i}": p for i in (1, 2, 3)
+                 for s, p in (("yes", 0.40), ("no", 0.63))}  # NO-Summe 1.89 < 2.02
+    assert main._candidate_tokens([], {"ev": ev}, asks_voll) == {
+        t for m in ev for t in (m.yes_token, m.no_token)}
+
+
 def test_scan_all_faellt_ohne_batchpreise_auf_volle_buecher_zurueck():
     # Book-Clients ohne get_top_prices (oder Batch-Komplettausfall) laden
     # weiterhin alle Bücher voll — kein stiller Datenverlust.

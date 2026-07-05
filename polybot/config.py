@@ -39,6 +39,11 @@ class RiskConfig:
     # nicht abrufbar ist — deshalb das echte Maximum 0.07 (Krypto), damit
     # eine unbekannte Rate die Edge nie überschätzt.
     taker_fee_rate: float = 0.07
+    # Live-Modus: vollständige YES/NO-Paare und NegRisk-NO-Sätze nach Fills
+    # on-chain zu pUSD mergen (Kapital-Recycling wie der Paper-Merge; siehe
+    # polybot/onchain.py). Erfordert POL für Gas auf dem Signer-Wallet;
+    # Fehler werden nur geloggt und stoppen nie den Bot-Loop.
+    live_auto_merge: bool = True
 
 
 @dataclass
@@ -98,6 +103,13 @@ class StrategyConfig:
     use_stream: bool = False
     stream_tick_s: float = 0.5            # Intervall des Inner-Loops
     stream_max_tokens: int = 500          # Abo-Deckel pro WSS-Verbindung
+    # Ereignisfenster fürs Stream-Abo: Binärmärkte, deren endDate innerhalb
+    # dieses Fensters liegt (laufende/bald endende Live-Ereignisse: Sport-
+    # spiele, Kurzfrist-Krypto), bekommen im WSS-Abo Vorrang vor reinem
+    # 24h-Volumen. Messbefund 04.07.2026 (WM-Abend): Preisverwerfungen
+    # ballen sich in Live-Fenstern, und das Abo-Budget (stream_max_tokens,
+    # ~500 von ~7000 Tokens) ist dort der Engpass. 0 = aus (nur Volumen).
+    stream_event_window_s: float = 4 * 3600.0
 
 
 @dataclass
@@ -158,6 +170,9 @@ class BotConfig:
             raise SystemExit("strategy.stream_tick_s muss > 0 sein")
         if cfg.strategy.stream_max_tokens <= 0:
             raise SystemExit("strategy.stream_max_tokens muss > 0 sein")
+        if cfg.strategy.stream_event_window_s < 0:
+            raise SystemExit("strategy.stream_event_window_s darf nicht negativ "
+                             "sein (0 = Ereignisfenster-Priorisierung aus)")
         if cfg.risk.paper_start_cash <= 0:
             raise SystemExit("risk.paper_start_cash muss > 0 sein — ohne Start-Cash "
                              "kann der Paper-Bot nichts kaufen")

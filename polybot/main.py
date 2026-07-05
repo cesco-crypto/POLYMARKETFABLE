@@ -52,8 +52,12 @@ def _candidate_tokens(markets: list[Market],
     """Tokens mit Arb-Verdacht laut Top-of-Book — nur deren Bücher lohnen sich.
 
     Binärmarkt: YES-Ask + NO-Ask < 1 + Puffer. NegRisk-Event: Summe der
-    YES-Asks < 1 + Puffer oder Summe der NO-Asks < (n-1) + Puffer; fehlt ein
-    Ask, ist das Event unvollständig und negrisk_arb verwirft es ohnehin.
+    YES-Asks < 1 + Puffer oder Summe der NO-Asks < (n-1) + Puffer.
+    Unvollständige Events (mindestens ein Ask fehlt) verwirft negrisk_arb —
+    der Recorder misst dort aber die Teilmengen-NO-Struktur (kind=
+    'negrisk_partial_no'): k verfügbare NO-Beine zahlen garantiert >= k-1;
+    Kandidat, wenn die Summe ihrer Asks < (k-1) + Puffer liegt. Nur diese
+    NO-Beine bekommen dann volle Bücher (echte Tiefen für die Messung).
     """
     out: set[str] = set()
     for m in markets:
@@ -63,11 +67,16 @@ def _candidate_tokens(markets: list[Market],
     for ev_markets in negrisk.values():
         yes = [asks.get(m.yes_token) for m in ev_markets]
         no = [asks.get(m.no_token) for m in ev_markets]
-        if None in yes or None in no:
+        if None not in yes and None not in no:
+            if (sum(yes) < 1.0 + PREFILTER_MARGIN
+                    or sum(no) < (len(ev_markets) - 1) + PREFILTER_MARGIN):
+                out.update(t for m in ev_markets for t in (m.yes_token, m.no_token))
             continue
-        if (sum(yes) < 1.0 + PREFILTER_MARGIN
-                or sum(no) < (len(ev_markets) - 1) + PREFILTER_MARGIN):
-            out.update(t for m in ev_markets for t in (m.yes_token, m.no_token))
+        avail_no = [(m.no_token, a) for m, a in zip(ev_markets, no) if a is not None]
+        if (len(avail_no) >= 2
+                and sum(a for _, a in avail_no)
+                < len(avail_no) - 1 + PREFILTER_MARGIN):
+            out.update(t for t, _ in avail_no)
     return out
 
 
@@ -255,6 +264,75 @@ def merge_positions(snap: MarketSnapshot, portfolio: Portfolio,
     return merged
 
 
+def live_merge_positions(snap: MarketSnapshot, portfolio: Portfolio, merger,
+                         ledger: CycleLedger | None = None) -> float:
+    """Live-Pendant zu merge_positions: erst on-chain mergen, dann buchen.
+
+    Gebucht wird NUR, was der MergeExecutor on-chain bestätigt hat (True
+    erst nach erfolgreichem Receipt) — die Buchhaltung bleibt so an der
+    Chain-Realität. Unterschiede zum Paper-Merge:
+
+    - Binärmarkt-Paare: ConditionalTokens.mergePositions (1 pUSD/Paar).
+    - NegRisk-NO-Sätze: NegRiskAdapter.convertPositions ((n-1) pUSD/Satz);
+      braucht die questionIds aller Teilmärkte — fehlt eine, wird der Satz
+      übersprungen. Läuft VOR den Paar-Merges, damit die kein NO-Bein aus
+      einem vollständigen Satz konsumieren.
+    - NegRisk-YES-Sätze: on-chain NICHT mergebar (kein Primitive) — sie
+      zahlen erst bei der Auflösung und bleiben liegen.
+    - YES/NO-Paare einzelner NegRisk-Teilmärkte (z.B. Market-Making-
+      Inventar): NegRiskAdapter.mergePositions (1 pUSD/Paar).
+
+    Der MergeExecutor loggt Fehler selbst und wirft nie; zur Sicherheit ist
+    auch diese Funktion gegen den Bot-Loop abgeschirmt.
+    """
+    merged = 0.0
+
+    def held(token: str) -> float:
+        pos = portfolio.positions.get(token)
+        return pos.shares if pos else 0.0
+
+    def book(market: str, kind: str, fn) -> None:
+        """On-chain bestätigten Merge in die Buchhaltung + Ledger übernehmen."""
+        nonlocal merged
+        before = portfolio.realized_pnl
+        sets = fn()
+        if sets > 0 and ledger is not None:
+            ledger.record_merge(market, kind, sets,
+                                portfolio.realized_pnl - before)
+        merged += sets
+
+    try:
+        for m in snap.markets:
+            sets = min(held(m.yes_token), held(m.no_token))
+            if sets <= 1e-9 or not m.condition_id:
+                continue
+            if merger.merge_pairs(m.condition_id, sets):
+                book(m.question, "complement",
+                     lambda m=m: portfolio.merge_pairs(m.yes_token, m.no_token))
+        for slug, ev_markets in snap.negrisk_events.items():
+            no_sets = min(held(m.no_token) for m in ev_markets)
+            question_ids = [m.question_id for m in ev_markets]
+            if no_sets > 1e-9 and all(question_ids) \
+                    and merger.merge_negrisk_no(question_ids, no_sets):
+                book(slug, "negrisk_no",
+                     lambda ev=ev_markets: portfolio.merge_negrisk_no(
+                         [m.no_token for m in ev], len(ev)))
+            for m in ev_markets:
+                sets = min(held(m.yes_token), held(m.no_token))
+                if sets <= 1e-9 or not m.condition_id:
+                    continue
+                if merger.merge_negrisk(m.condition_id, sets):
+                    book(m.question, "negrisk_pair",
+                         lambda m=m: portfolio.merge_pairs(m.yes_token,
+                                                           m.no_token))
+            if min(held(m.yes_token) for m in ev_markets) > 1e-9:
+                log.debug("NegRisk-YES-Satz %s on-chain nicht mergebar — "
+                          "zahlt erst bei Auflösung", slug)
+    except Exception as e:  # noqa: BLE001 — Merge darf den Bot-Loop nie crashen
+        log.error("Live-Merge fehlgeschlagen: %s", e)
+    return merged
+
+
 def tick(cfg: BotConfig, snap: MarketSnapshot, strategies, risk: RiskManager,
          broker, portfolio: Portfolio,
          recorder: OpportunityRecorder | None = None,
@@ -278,8 +356,15 @@ def tick(cfg: BotConfig, snap: MarketSnapshot, strategies, risk: RiskManager,
     fills = broker.execute(approved, snap.books, portfolio, snap.fee_rates)
     if cfg.mode != "live":
         # Paper-Modus: frisch gefüllte Arb-Paare/Sets sofort zu USDC mergen —
-        # live wäre das ein on-chain CTF-Merge und Sache des LiveBrokers.
+        # live läuft dasselbe als on-chain Merge (siehe unten).
         merge_positions(snap, portfolio, ledger)
+    elif cfg.risk.live_auto_merge:
+        # Live-Modus: vollständige Paare/Sätze on-chain zu pUSD mergen;
+        # gebucht wird nur, was on-chain bestätigt wurde. Ohne MergeExecutor
+        # (Init-Fehler, Test-Broker) bleibt alles liegen.
+        merger = getattr(broker, "merger", None)
+        if merger is not None:
+            live_merge_positions(snap, portfolio, merger, ledger)
     risk.check_daily_loss(portfolio, marks)
     if ledger is not None:
         # PnL-Ledger für den Cycle-Report (dedupliziert, crasht nie den Tick).
@@ -287,15 +372,22 @@ def tick(cfg: BotConfig, snap: MarketSnapshot, strategies, risk: RiskManager,
     return fills
 
 
-def stream_tokens(snap: MarketSnapshot, cap: int) -> list[str]:
+def stream_tokens(snap: MarketSnapshot, cap: int,
+                  event_window_s: float = 0.0,
+                  now: float | None = None) -> list[str]:
     """Kandidaten-Tokens für das WSS-Abo aus dem letzten REST-Snapshot.
 
     NegRisk-Events zuerst und nur KOMPLETT (negrisk_arb braucht alle Beine
-    eines Events — halbe Events wären totes Abo-Budget), danach Binärmärkte
-    absteigend nach 24h-Volumen, bis der Deckel erreicht ist.
+    eines Events — halbe Events wären totes Abo-Budget), danach Binärmärkte:
+    zuerst die im EREIGNISFENSTER (endDate innerhalb event_window_s — dort
+    laufen die Live-Ereignisse, in denen sich Preisverwerfungen ballen;
+    Messbefund WM-Abend 04.07.2026), innerhalb der Gruppen absteigend nach
+    24h-Volumen, bis der Deckel erreicht ist. event_window_s=0 schaltet die
+    Fenster-Priorisierung ab (reine Volumen-Sortierung wie zuvor).
     """
     out: list[str] = []
     seen: set[str] = set()
+    now = time.time() if now is None else now
 
     def add(*tokens: str) -> None:
         for t in tokens:
@@ -303,12 +395,17 @@ def stream_tokens(snap: MarketSnapshot, cap: int) -> list[str]:
                 seen.add(t)
                 out.append(t)
 
+    def in_event_window(m: Market) -> bool:
+        return (event_window_s > 0 and m.end_ts is not None
+                and m.end_ts - now <= event_window_s)
+
     for ev_markets in snap.negrisk_events.values():
         if len(out) + 2 * len(ev_markets) > cap:
             continue
         for m in ev_markets:
             add(m.yes_token, m.no_token)
-    for m in sorted(snap.markets, key=lambda m: m.volume_24h, reverse=True):
+    for m in sorted(snap.markets,
+                    key=lambda m: (not in_event_window(m), -m.volume_24h)):
         if len(out) + 2 > cap:
             break
         add(m.yes_token, m.no_token)
@@ -441,7 +538,9 @@ def cmd_run(cfg: BotConfig) -> None:
                 if streamer is not None:
                     # Abo auf die Kandidaten des frischen Snapshots rotieren —
                     # reine Zustandsänderung, wirft nicht.
-                    streamer.subscribe(stream_tokens(snap, cfg.strategy.stream_max_tokens))
+                    streamer.subscribe(stream_tokens(
+                        snap, cfg.strategy.stream_max_tokens,
+                        event_window_s=cfg.strategy.stream_event_window_s))
                 fills = tick(cfg, snap, strategies, risk, broker, portfolio,
                              recorder, ledger)
                 marks = {t: b.midpoint for t, b in snap.books.items() if b.midpoint}

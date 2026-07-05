@@ -408,6 +408,18 @@ class LiveBroker(Broker):
         # Alle ruhenden Orders je orderID — ihre (Teil-)Fills werden zu Beginn
         # jedes Ticks gegen den Order-Status reconciled.
         self._pending: dict[str, _PendingOrder] = {}
+        # On-Chain-Merges (Kapital-Recycling, siehe main.live_merge_positions):
+        # ein Init-Fehler (RPC/Abhängigkeit) deaktiviert nur das Auto-Merge,
+        # der Handel selbst läuft unverändert weiter.
+        self.merger = None
+        if cfg.risk.live_auto_merge:
+            try:
+                from polybot.onchain import MergeExecutor
+
+                self.merger = MergeExecutor(cfg.private_key)
+            except Exception as e:  # noqa: BLE001 — Merge ist nie handelskritisch
+                log.error("MergeExecutor nicht initialisierbar: %s — "
+                          "Live-Auto-Merge deaktiviert", e)
         log.info("Live-Broker verbunden (Adresse %s)", self.client.get_address())
 
     # ---- Ausführung --------------------------------------------------------
