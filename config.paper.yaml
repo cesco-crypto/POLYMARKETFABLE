@@ -20,6 +20,14 @@ strategy:
   enabled:
     - complement_arb
     - negrisk_arb
+    - market_making
+  # Market Making (vorsichtige Paper-Messung): Quotes NUR in den Top-10-
+  # Märkten nach 24h-Volumen mit engem Spread (<= mm_spread), immer 1 Tick
+  # hinter dem Best-Bid/Ask (nie aggressiv -> nur Maker-Fills). Rebate wird
+  # tokenspezifisch simuliert (20% der Taker-Fee des Marktes).
+  mm_size_usdc: 50
+  mm_max_inventory_usdc: 500
+  mm_max_markets: 10
   scan_all_markets: true      # ALLE aktiven Märkte scannen (max_markets ohne Wirkung)
   max_markets: 150            # nur relevant, falls scan_all_markets: false
   min_liquidity_usdc: 2000    # breiter scannen als im Beispiel (10k)

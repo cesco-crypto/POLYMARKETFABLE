@@ -481,11 +481,15 @@ def test_paperbroker_ruhende_order_fuellt_bei_preisdurchgang():
     assert pf.positions == {}
     assert len(pf.resting_orders) == 1
 
-    # Ask fällt unter den Orderpreis -> Maker-Fill zum Orderpreis, Gebühr 0
+    # Ask fällt unter den Orderpreis -> Maker-Fill zum Orderpreis, Gebühr 0;
+    # die bekannte Taker-Rate des Tokens bringt stattdessen ein Rebate
+    # (20% der Taker-Fee, siehe MAKER_REBATE_SHARE).
     crossed = OrderBook(token_id="tok", bids=[Level(0.40, 50)], asks=[Level(0.44, 50)])
     assert broker.execute([], {"tok": crossed}, pf, fee_rates={"tok": 0.07}) == 1
     assert pf.positions["tok"].shares == pytest.approx(10)
-    assert pf.cash == pytest.approx(100.0 - 4.5)
+    rebate = 10 * (0.2 * 0.07) * 0.45 * (1 - 0.45)
+    assert pf.cash == pytest.approx(100.0 - 4.5 + rebate)
+    assert pf.rebates_earned == pytest.approx(rebate)
     assert pf.fills[-1].price == pytest.approx(0.45)
     assert pf.fills[-1].fee == 0.0  # Maker zahlen keine Taker-Gebühr
     assert pf.resting_orders == []
@@ -595,6 +599,38 @@ def test_paperbroker_ohne_rebate_rate_keine_gutschrift():
     broker.execute([], {"tok": crossed}, pf)
     assert pf.rebates_earned == 0.0
     assert pf.cash == pytest.approx(100.0 - 5.0)
+
+
+def test_paperbroker_rebate_tokenspezifisch_20_prozent_der_taker_fee():
+    # Polymarket zahlt Makern 20-25% der Taker-Fees des Marktes: bei bekannter
+    # Taker-Rate gilt rebate_rate = 0.2 * taker_fee_rate(token) — die globale
+    # maker_rebate_rate ist dann irrelevant (nur Fallback).
+    cfg = BotConfig()
+    cfg.strategy.maker_rebate_rate = 0.0   # Fallback aus — Rebate kommt trotzdem
+    broker = PaperBroker(cfg)
+    pf = Portfolio(cash=100.0)
+    fee_rates = {"tok": 0.05}
+    book = OrderBook(token_id="tok", bids=[], asks=[Level(0.60, 50)])
+    sig = Signal(token_id="tok", side="BUY", price=0.50, size=10, reason="MM Bid")
+    assert broker.execute([sig], {"tok": book}, pf, fee_rates) == 0
+
+    crossed = OrderBook(token_id="tok", bids=[], asks=[Level(0.50, 50)])
+    assert broker.execute([], {"tok": crossed}, pf, fee_rates) == 1
+    rebate = 10 * (0.2 * 0.05) * 0.50 * (1 - 0.50)  # 0.2*taker_rate * p*(1-p)
+    assert pf.rebates_earned == pytest.approx(rebate)
+    assert pf.cash == pytest.approx(100.0 - 5.0 + rebate)
+
+
+def test_paperbroker_rebate_fallback_nur_ohne_bekannte_fee_rate():
+    # Ist die Taker-Rate des Tokens bekannt, übersteuert sie den Fallback —
+    # auch wenn der Fallback höher wäre (kein Rosinenpicken).
+    cfg = BotConfig()
+    cfg.strategy.maker_rebate_rate = 0.01
+    broker = PaperBroker(cfg)
+    assert broker._rebate_rate("tok", {"tok": 0.02}) == pytest.approx(0.2 * 0.02)
+    assert broker._rebate_rate("tok", {}) == pytest.approx(0.01)
+    # Bekannte Rate 0.0 (gebührenfreie Kategorie) heißt auch Rebate 0.0
+    assert broker._rebate_rate("tok", {"tok": 0.0}) == 0.0
 
 
 def test_paperbroker_ruhende_teilfuellung_bleibt_ruhen():

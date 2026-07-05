@@ -8,11 +8,12 @@ from polybot.strategies import ComplementArb, MarketMaking, NegRiskArb
 from polybot.strategies.base import MarketSnapshot
 
 
-def mk_market(i: int, neg_risk: bool = False, augmented: bool = False) -> Market:
+def mk_market(i: int, neg_risk: bool = False, augmented: bool = False,
+              volume_24h: float = 20_000) -> Market:
     return Market(
         condition_id=f"cond{i}", question=f"Frage {i}?", slug=f"frage-{i}",
         yes_token=f"yes{i}", no_token=f"no{i}",
-        liquidity=50_000, volume_24h=20_000, neg_risk=neg_risk,
+        liquidity=50_000, volume_24h=volume_24h, neg_risk=neg_risk,
         neg_risk_augmented=augmented,
     )
 
@@ -214,9 +215,10 @@ def test_complement_arb_ueberspringt_negrisk_teilmaerkte():
 # ---- Regressionstests: Market Making (Inventar & kein Naked Short) --------
 
 def mm_snapshot(portfolio: Portfolio | None) -> MarketSnapshot:
+    # Enger Spread (0.02 = mm_spread-Default): Markt qualifiziert als Kandidat.
     m = mk_market(1)
     book = OrderBook(token_id="yes1",
-                     bids=[Level(0.48, 500)], asks=[Level(0.52, 500)])
+                     bids=[Level(0.49, 500)], asks=[Level(0.51, 500)])
     return MarketSnapshot(markets=[m], books={"yes1": book}, portfolio=portfolio)
 
 
@@ -253,3 +255,49 @@ def test_mm_quotes_tragen_replace_flag():
     pf.apply_fill(Fill(ts=0, token_id="yes1", side="BUY", price=0.50, size=10, reason=""))
     signals = MarketMaking(BotConfig()).generate(mm_snapshot(pf))
     assert signals and all(s.replace for s in signals)
+
+
+# ---- Geschärftes Market Making: Marktauswahl & passive Preissetzung --------
+
+def test_mm_quotet_1_tick_hinter_dem_touch():
+    # Nie aggressiv: Bid 1 Tick UNTER dem besten Bid, Ask 1 Tick ÜBER dem
+    # besten Ask — jeder Fill ist damit garantiert ein Maker-Fill.
+    pf = Portfolio()
+    pf.apply_fill(Fill(ts=0, token_id="yes1", side="BUY", price=0.50, size=10, reason=""))
+    signals = MarketMaking(BotConfig()).generate(mm_snapshot(pf))
+    by_side = {s.side: s for s in signals}
+    assert by_side["BUY"].price == pytest.approx(0.48)   # best_bid 0.49 - 0.01
+    assert by_side["SELL"].price == pytest.approx(0.52)  # best_ask 0.51 + 0.01
+
+
+def test_mm_ueberspringt_weiten_spread():
+    # Spread 0.04 > mm_spread (0.02): illiquide/unsicher bepreist -> keine Quotes.
+    m = mk_market(1)
+    book = OrderBook(token_id="yes1",
+                     bids=[Level(0.48, 500)], asks=[Level(0.52, 500)])
+    snap = MarketSnapshot(markets=[m], books={"yes1": book}, portfolio=Portfolio())
+    assert MarketMaking(BotConfig()).generate(snap) == []
+
+
+def test_mm_quotet_nur_top_n_maerkte_nach_volumen():
+    # mm_max_markets deckelt die Kandidaten: nur die volumenstärksten Märkte
+    # bekommen Quotes, auch wenn andere Märkte enge Spreads hätten.
+    cfg = BotConfig()
+    cfg.strategy.mm_max_markets = 1
+    markets = [mk_market(1, volume_24h=1_000), mk_market(2, volume_24h=99_000)]
+    books = {f"yes{i}": OrderBook(token_id=f"yes{i}",
+                                  bids=[Level(0.49, 500)], asks=[Level(0.51, 500)])
+             for i in (1, 2)}
+    snap = MarketSnapshot(markets=markets, books=books, portfolio=Portfolio())
+    signals = MarketMaking(cfg).generate(snap)
+    assert signals and {s.token_id for s in signals} == {"yes2"}
+
+
+def test_mm_max_markets_default_und_yaml_ladbar(tmp_path):
+    assert BotConfig().strategy.mm_max_markets == 10
+    p = tmp_path / "config.yaml"
+    p.write_text("strategy:\n  mm_max_markets: 3\n")
+    assert BotConfig.load(p).strategy.mm_max_markets == 3
+    p.write_text("strategy:\n  mm_max_markets: 0\n")
+    with pytest.raises(SystemExit, match="mm_max_markets"):
+        BotConfig.load(p)

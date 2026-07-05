@@ -38,6 +38,9 @@ class MarketSnapshot:
     markets: list[Market] = field(default_factory=list)
     books: dict[str, OrderBook] = field(default_factory=dict)
     negrisk_events: dict[str, list[Market]] = field(default_factory=dict)
+    # Events (auch nicht-negRisk) mit erkannter Implikationsstruktur — nur
+    # für den Implikations-Detektor (reine Beobachtung), Slug -> Teilmärkte.
+    events: dict[str, list[Market]] = field(default_factory=dict)
     # Tokenspezifische Taker-Fee-Raten (kategorieabhängig 0.00-0.07);
     # fehlende Tokens fallen auf cfg.risk.taker_fee_rate (Maximum) zurück.
     fee_rates: dict[str, float] = field(default_factory=dict)

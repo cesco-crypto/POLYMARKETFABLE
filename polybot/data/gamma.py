@@ -239,6 +239,46 @@ class GammaClient:
             liq_max = window_min
         return list(out.values())
 
+    def all_events(self, min_liquidity: float = 0.0, limit: int = 200) -> dict[str, list[Market]]:
+        """ALLE aktiven Events (negRisk und normale) mit ihren Teilmärkten.
+
+        Für den Implikations-Detektor (reine Beobachtung): der braucht die
+        Event-Gruppierung auch für Events ohne negRisk-Struktur (z.B.
+        Over/Under-Ketten am selben Spiel). Anders als negrisk_events wird
+        ein Event NICHT verworfen, wenn ein Teilmarkt fehlt/geschlossen ist —
+        Implikationspaare sind paarweise gültig, Vollständigkeit ist keine
+        Voraussetzung. Nicht parsebare/geschlossene Teilmärkte werden nur
+        einzeln herausgefiltert.
+        """
+        result: dict[str, list[Market]] = {}
+        offset = 0
+        page = 100  # Server-Cap pro /events-Request (siehe negrisk_events)
+        while offset < limit:
+            events = self._get(
+                "/events",
+                active="true",
+                closed="false",
+                order="liquidity",
+                ascending="false",
+                limit=min(page, limit - offset),
+                offset=offset,
+            )
+            if not events:
+                break
+            for ev in events:
+                rows = [x for x in ev.get("markets", []) if x.get("active") is True]
+                markets = [m for m in (_parse_market(x) for x in rows)
+                           if m and not m.closed]
+                if len(markets) >= 2 and sum(m.liquidity for m in markets) >= min_liquidity:
+                    slug = ev.get("slug", ev.get("id", "?"))
+                    for m in markets:
+                        m.event_slug = slug
+                    result[slug] = markets
+            if len(events) < page:
+                break
+            offset += page
+        return result
+
     def negrisk_events(self, min_liquidity: float = 0.0, limit: int = 200) -> dict[str, list[Market]]:
         """Multi-Outcome-Events (negRisk): Event-Slug -> Liste der Teilmärkte.
 

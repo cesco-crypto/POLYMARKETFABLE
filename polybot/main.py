@@ -28,6 +28,9 @@ from polybot.recorder import (OpportunityRecorder, aggregate,
 from polybot.risk import KillSwitch, RiskManager
 from polybot.strategies import REGISTRY
 from polybot.strategies.base import MarketSnapshot
+from polybot.strategies.implication_detector import (find_implication_pairs,
+                                                     pair_tokens)
+from polybot.strategies.market_making import candidate_markets as mm_candidate_markets
 
 console = Console()
 log = logging.getLogger("polybot")
@@ -65,24 +68,37 @@ def _candidate_tokens(markets: list[Market],
 
 def _load_books(cfg: BotConfig, books: BookClient, token_ids: set[str],
                 markets: list[Market],
-                negrisk: dict[str, list[Market]]) -> dict[str, OrderBook]:
+                negrisk: dict[str, list[Market]],
+                extra_full: set[str] | None = None) -> dict[str, OrderBook]:
     """Orderbücher laden — zweistufig, wenn möglich.
 
     Stufe 1: Batch-Preise (POST /prices, 200 Tokens/Request) für alle Tokens;
     Stufe 2: volle Bücher (POST /books, 50 Tokens/Request) nur für Kandidaten.
-    Nicht-Kandidaten bekommen ein synthetisches Top-of-Book (Größe 0), damit
-    Marks/Kill-Switch weiter Midpoints sehen; Strategien verwerfen sie über
-    die Mindestgröße. Fallbacks auf den vollen Pfad: Market Making braucht
-    echte Tiefe in ALLEN Märkten; Book-Clients ohne get_top_prices (Test-
-    Fakes) und ein Komplettausfall der Batch-Preise ebenso.
+    Kandidaten sind die Arb-Verdachtsfälle plus — bei aktivem Market Making —
+    die YES-Tokens der Top-N-MM-Kandidaten (strategies.market_making.
+    candidate_markets); volle Bücher für ALLE Märkte würden den Tick massiv
+    verlangsamen. Nicht-Kandidaten bekommen ein synthetisches Top-of-Book
+    (Größe 0), damit Marks/Kill-Switch weiter Midpoints sehen; Strategien
+    verwerfen sie über die Mindestgröße. Fallbacks auf den vollen Pfad:
+    Book-Clients ohne get_top_prices (Test-Fakes) und ein Komplettausfall
+    der Batch-Preise.
     """
-    if "market_making" in cfg.strategy.enabled or not hasattr(books, "get_top_prices"):
+    if not hasattr(books, "get_top_prices"):
         return books.get_books(list(token_ids))
     top = books.get_top_prices(list(token_ids))
     if not top:
         return books.get_books(list(token_ids))
     asks = {t: a for t, (_, a) in top.items() if a is not None}
-    book_map = books.get_books(list(_candidate_tokens(markets, negrisk, asks)))
+    wanted = _candidate_tokens(markets, negrisk, asks)
+    if "market_making" in cfg.strategy.enabled:
+        # Market Making quotet nur YES-Tokens seiner Top-N-Kandidaten —
+        # genau dafür braucht es echte Buchtiefe, für mehr nicht.
+        wanted.update(m.yes_token for m in mm_candidate_markets(cfg, markets))
+    if extra_full:
+        # z.B. Implikations-Bein-Tokens: der Detektor braucht echte
+        # Ask-Tiefen, synthetische Größe-0-Bücher wären wertlose Messung.
+        wanted.update(extra_full)
+    book_map = books.get_books(list(wanted))
     for t in token_ids - set(book_map):
         bid, ask = top.get(t, (None, None))
         if bid is None and ask is None:
@@ -93,6 +109,40 @@ def _load_books(cfg: BotConfig, books: BookClient, token_ids: set[str],
             asks=[Level(ask, 0.0)] if ask is not None else [],
         )
     return book_map
+
+
+def _implication_candidates(
+    cfg: BotConfig, gamma: GammaClient,
+    negrisk: dict[str, list[Market]],
+) -> tuple[dict[str, list[Market]], set[str]]:
+    """Events + Bein-Tokens für den Implikations-Detektor (reine Messung).
+
+    Lädt ALLE Gamma-Events (auch nicht-negRisk) und behält nur die, in denen
+    der Detektor per Titel-Parsing eine Implikationsstruktur erkennt — sonst
+    würden unnötig viele Orderbücher geladen. Die Paare selbst werden über
+    Events UND negrisk erkannt (bei Slug-Kollision gewinnt negrisk, wie im
+    Detektor). Fehler sind nie kritisch: der Detektor beobachtet nur, ein
+    Ausfall kostet ausschließlich Messdaten.
+    """
+    s = cfg.strategy
+    if not hasattr(gamma, "all_events"):  # Test-Fakes ohne Event-Endpunkt
+        return {}, set()
+    try:
+        raw = gamma.all_events(min_liquidity=s.min_liquidity_usdc)
+    except Exception as e:  # noqa: BLE001 — Messpfad darf den Tick nie crashen
+        log.warning("Implikations-Events nicht ladbar: %s", e)
+        return {}, set()
+    events: dict[str, list[Market]] = {}
+    for slug, ms in raw.items():
+        ms = [m for m in ms if m.tradeable(s.min_time_to_end_s)]
+        if len(ms) >= 2:
+            events[slug] = ms
+    merged = dict(negrisk)
+    for slug, ms in events.items():
+        merged.setdefault(slug, ms)
+    pairs = find_implication_pairs(merged)
+    keep = {p.event_slug for p in pairs}
+    return {slug: ms for slug, ms in events.items() if slug in keep}, pair_tokens(pairs)
 
 
 def build_snapshot(cfg: BotConfig, gamma: GammaClient, books: BookClient,
@@ -131,18 +181,27 @@ def build_snapshot(cfg: BotConfig, gamma: GammaClient, books: BookClient,
                           key=lambda kv: sum(m.liquidity for m in kv[1]),
                           reverse=True)[: s.max_negrisk_events])
 
+    # Implikations-Detektor (reine Beobachtung): Events mit erkennbarer
+    # Implikationsstruktur plus die Bein-Tokens, deren Bücher er braucht.
+    events: dict[str, list[Market]] = {}
+    impl_tokens: set[str] = set()
+    if s.detect_implications:
+        events, impl_tokens = _implication_candidates(cfg, gamma, negrisk)
+
     token_ids: set[str] = set()
     for m in markets:
         token_ids.update((m.yes_token, m.no_token))
     for ev_markets in negrisk.values():
         for m in ev_markets:
             token_ids.update((m.yes_token, m.no_token))
+    token_ids.update(impl_tokens)
 
     if s.scan_all_markets:
         # Beim Vollmarkt-Scan sind volle Bücher für alle Tokens unbezahlbar
         # (~7k Tokens): zweistufig laden — Batch-Top-of-Book für alle,
         # volle Bücher nur für Arb-Kandidaten (siehe _load_books).
-        book_map = _load_books(cfg, books, token_ids, markets, negrisk)
+        book_map = _load_books(cfg, books, token_ids, markets, negrisk,
+                               extra_full=impl_tokens)
     else:
         book_map = books.get_books(list(token_ids))
     # Tokenspezifische Taker-Fee-Raten (kategorieabhängig) aus den Gamma-
@@ -151,8 +210,10 @@ def build_snapshot(cfg: BotConfig, gamma: GammaClient, books: BookClient,
     fees.update_from_markets(markets)
     for ev_markets in negrisk.values():
         fees.update_from_markets(ev_markets)
+    for ev_markets in events.values():
+        fees.update_from_markets(ev_markets)
     return MarketSnapshot(markets=markets, books=book_map, negrisk_events=negrisk,
-                          fee_rates=fees.rates_for(token_ids))
+                          events=events, fee_rates=fees.rates_for(token_ids))
 
 
 def merge_positions(snap: MarketSnapshot, portfolio: Portfolio) -> float:
@@ -255,6 +316,7 @@ def stream_loop(cfg: BotConfig, snap: MarketSnapshot, strategies,
         fast = MarketSnapshot(markets=snap.markets,
                               books={**snap.books, **streamed},
                               negrisk_events=snap.negrisk_events,
+                              events=snap.events,
                               fee_rates=snap.fee_rates)
         try:
             got = tick(cfg, fast, strategies, risk, broker, portfolio, recorder)

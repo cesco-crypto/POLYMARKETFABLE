@@ -44,15 +44,21 @@ class RiskConfig:
 @dataclass
 class StrategyConfig:
     enabled: list[str] = field(default_factory=lambda: ["complement_arb", "negrisk_arb"])
-    # Market Making
-    mm_spread: float = 0.02               # Quotierung ±2 Cent um den Mittelkurs
+    # Market Making: gequotet wird NUR in Märkten mit engem Spread (höchstens
+    # mm_spread) und hohem Volumen (Top-mm_max_markets nach 24h-Volumen),
+    # und immer mindestens 1 Tick HINTER dem Best-Bid/Ask — nie aggressiv,
+    # damit jeder Fill ein Maker-Fill ist (Gebühr 0 + Rebate).
+    mm_spread: float = 0.02               # max. tolerierter Spread der Kandidaten-Märkte
     mm_size_usdc: float = 25.0
     mm_max_inventory_usdc: float = 100.0
+    mm_max_markets: int = 10              # Quotes nur in den Top-N-Märkten nach volume_24h
     # Maker-Rebate-Simulation (Paper): effektive Rebate-Rate analog zur
     # Taker-Formel — rebate = rate * p * (1-p) pro Share auf Maker-Fills.
-    # Polymarket zahlt Makern 20-25% der Taker-Fees (Taker-Rate 0.00-0.07),
-    # realistisch also ~0.0-0.0175. Default 0.0 = aus (konservativ: kein
-    # simulierter Verdienst, den es live vielleicht nicht gäbe).
+    # Polymarket zahlt Makern 20-25% der Taker-Fees des Marktes; der Paper-
+    # Broker rechnet deshalb tokenspezifisch 0.2 * taker_fee_rate(token)
+    # (siehe execution.MAKER_REBATE_SHARE). Dieser Wert hier ist nur der
+    # FALLBACK für Tokens ohne bekannte Taker-Rate. Default 0.0 = aus
+    # (konservativ: kein simulierter Verdienst, den es live vielleicht nicht gäbe).
     maker_rebate_rate: float = 0.0
     # Marktauswahl
     min_liquidity_usdc: float = 10_000.0
@@ -78,6 +84,12 @@ class StrategyConfig:
     # mindestens ein Buch und negrisk_arb verwirft sie dann ohnehin komplett.
     max_negrisk_events: int = 20
     max_negrisk_submarkets: int = 20
+    # Cross-Market-Implikations-Detektor (REINE BEOBACHTUNG, keine Signale):
+    # findet in Gamma-Events Marktpaare mit logischer Implikation (Over/
+    # Under-Ketten 'O/U X.5', win/reach-final-Paare) und loggt Preis-
+    # Verletzungen als kind='implication' ins Opportunity-Log — Messung
+    # vor Trade. Kostet pro Tick einen zusätzlichen /events-Abruf.
+    detect_implications: bool = True
     # WebSocket-Streaming (modeunabhängig): zwischen den REST-Snapshots läuft
     # ein schneller Inner-Loop, der die live gestreamten Orderbücher gegen die
     # Strategien prüft — Reaktionszeit in Millisekunden statt poll_interval_s.
@@ -152,6 +164,8 @@ class BotConfig:
         if not 0.0 <= cfg.risk.taker_fee_rate <= 0.1:
             raise SystemExit("risk.taker_fee_rate muss zwischen 0 und 0.1 liegen "
                              "(Polymarket-Maximum ist 0.07)")
+        if cfg.strategy.mm_max_markets <= 0:
+            raise SystemExit("strategy.mm_max_markets muss > 0 sein")
         if not 0.0 <= cfg.strategy.maker_rebate_rate <= 0.1:
             raise SystemExit("strategy.maker_rebate_rate muss zwischen 0 und 0.1 liegen "
                              "(realistisch sind 20-25% der Taker-Rate, also <= 0.0175)")

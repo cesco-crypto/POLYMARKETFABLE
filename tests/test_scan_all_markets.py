@@ -133,6 +133,46 @@ def test_scan_all_laedt_buecher_zweistufig_nur_fuer_kandidaten():
     assert snap.books["yes2"].best_ask.size == 0.0
 
 
+def test_scan_all_mit_market_making_laedt_nur_mm_kandidaten_voll():
+    # Aktives market_making darf NICHT mehr auf den Voll-Fallback kippen
+    # (alle Bücher laden = Tick massiv langsamer): zusätzlich zu den
+    # Arb-Kandidaten werden nur die YES-Tokens der Top-mm_max_markets
+    # nach 24h-Volumen voll geladen.
+    cfg = BotConfig()
+    cfg.strategy.scan_all_markets = True
+    cfg.strategy.enabled = ["complement_arb", "market_making"]
+    cfg.strategy.mm_max_markets = 1
+    gamma = FakeGamma([market(1, volume_24h=90_000), market(2, volume_24h=10_000),
+                       market(3, volume_24h=50_000)])
+    books = FakeTwoStageBooks({
+        # kein Markt ist Arb-Kandidat (alle Summen > 1.02) ...
+        "yes1": (0.50, 0.51), "no1": (0.49, 0.52),
+        "yes2": (0.50, 0.55), "no2": (0.50, 0.55),
+        "yes3": (0.50, 0.55), "no3": (0.50, 0.55),
+    })
+    snap = main.build_snapshot(cfg, gamma, books)
+    # ... voll geladen wird nur der YES-Token des volumenstärksten Markts
+    assert books.book_requests == [["yes1"]]
+    # die übrigen Tokens behalten ihr synthetisches Top-of-Book (Marks)
+    assert snap.books["yes3"].best_ask.size == 0.0
+
+
+def test_scan_all_mm_kandidaten_ergaenzen_arb_kandidaten():
+    # Arb-Kandidat (Markt 2) und MM-Kandidat (Markt 1, Top-Volumen) werden
+    # gemeinsam in Stufe 2 geladen — keiner verdrängt den anderen.
+    cfg = BotConfig()
+    cfg.strategy.scan_all_markets = True
+    cfg.strategy.enabled = ["complement_arb", "market_making"]
+    cfg.strategy.mm_max_markets = 1
+    gamma = FakeGamma([market(1, volume_24h=90_000), market(2, volume_24h=10_000)])
+    books = FakeTwoStageBooks({
+        "yes1": (0.50, 0.55), "no1": (0.50, 0.55),   # 1.10 -> kein Arb-Kandidat
+        "yes2": (0.40, 0.45), "no2": (0.50, 0.54),   # 0.99 -> Arb-Kandidat
+    })
+    main.build_snapshot(cfg, gamma, books)
+    assert books.book_requests == [["no2", "yes1", "yes2"]]
+
+
 def test_scan_all_faellt_ohne_batchpreise_auf_volle_buecher_zurueck():
     # Book-Clients ohne get_top_prices (oder Batch-Komplettausfall) laden
     # weiterhin alle Bücher voll — kein stiller Datenverlust.

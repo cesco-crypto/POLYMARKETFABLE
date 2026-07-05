@@ -24,6 +24,11 @@ from polybot.strategies.base import Signal
 
 log = logging.getLogger(__name__)
 
+# Polymarket zahlt Makern 20-25% der Taker-Fees des Marktes als Rebate —
+# konservativ das untere Ende für die Paper-Simulation: effektive
+# Maker-Rebate-Rate pro Token = 0.2 * taker_fee_rate(token).
+MAKER_REBATE_SHARE = 0.2
+
 
 def _quantize_price(price: float, tick: float, side: str) -> float:
     """Preis aufs Tick-Raster quantisieren: BUY ab-, SELL aufrunden.
@@ -93,8 +98,22 @@ class PaperBroker(Broker):
         # konfigurierte Maximum); ohne Config (Tests) gebührenfrei.
         self.fallback_fee_rate = cfg.risk.taker_fee_rate if cfg else 0.0
         # Rebate-Simulation für Maker-Fills: rebate = rate * p * (1-p) pro
-        # Share (analog zur Taker-Formel). Default 0.0 = aus (konservativ).
+        # Share (analog zur Taker-Formel). Die Rate ist tokenspezifisch
+        # MAKER_REBATE_SHARE * taker_fee_rate(token); dieser Wert hier ist
+        # nur der Fallback ohne bekannte Taker-Rate. Default 0.0 = aus.
         self.maker_rebate_rate = cfg.strategy.maker_rebate_rate if cfg else 0.0
+
+    def _rebate_rate(self, token_id: str, fee_rates: dict[str, float]) -> float:
+        """Maker-Rebate-Rate eines Tokens: 20% seiner Taker-Fee-Rate.
+
+        Ohne bekannte tokenspezifische Taker-Rate greift der konfigurierte
+        Pauschalwert strategy.maker_rebate_rate (Default 0.0 — konservativ
+        kein simulierter Verdienst, den es live vielleicht nicht gäbe).
+        """
+        rate = fee_rates.get(token_id)
+        if rate is None:
+            return self.maker_rebate_rate
+        return MAKER_REBATE_SHARE * rate
 
     def _walk_levels(self, s: Signal, levels, max_size: float, skip: float,
                      cash_left: float, rate: float) -> tuple[float, float, float]:
@@ -136,7 +155,8 @@ class PaperBroker(Broker):
     # ---- Ruhende Orders (Maker-Simulation) ---------------------------------
 
     def _match_resting(self, books: dict[str, OrderBook], portfolio: Portfolio,
-                       consumed: dict[tuple[str, str], float]) -> int:
+                       consumed: dict[tuple[str, str], float],
+                       fee_rates: dict[str, float]) -> int:
         """Ruhende Orders gegen den aktuellen Book-Snapshot prüfen und füllen.
 
         Konservativ: eine ruhende BUY füllt erst, wenn der beste Ask auf oder
@@ -167,8 +187,9 @@ class PaperBroker(Broker):
             fill = Fill(ts=time.time(), token_id=o.token_id, side=o.side,
                         price=o.price, size=take, reason=o.reason, fee=0.0)
             portfolio.apply_fill(fill)
-            # Offizieller Maker-Verdienstkanal: Rebate-Anteil der Taker-Fees.
-            portfolio.credit_rebate(take * self.maker_rebate_rate
+            # Offizieller Maker-Verdienstkanal: Rebate-Anteil der Taker-Fees
+            # des Marktes — tokenspezifisch, siehe _rebate_rate.
+            portfolio.credit_rebate(take * self._rebate_rate(o.token_id, fee_rates)
                                     * o.price * (1.0 - o.price))
             consumed[(o.token_id, o.side)] = consumed.get((o.token_id, o.side), 0.0) + take
             fills += 1
@@ -229,7 +250,7 @@ class PaperBroker(Broker):
         consumed: dict[tuple[str, str], float] = {}
         # Zuerst ruhende Orders gegen das aktuelle Buch prüfen (Maker-Fills);
         # die dabei konsumierte Liquidität sehen neue Signale nicht mehr.
-        fills = self._match_resting(books, portfolio, consumed)
+        fills = self._match_resting(books, portfolio, consumed, fee_rates)
         # Laufendes Cash über alle geplanten Fills dieses Aufrufs. Konservativ:
         # Erlöse noch nicht gebuchter Gruppen-SELLs zählen nicht als verfügbar;
         # das von ruhenden BUYs reservierte Cash ist nicht verfügbar.

@@ -22,6 +22,7 @@ from pathlib import Path
 
 from polybot.config import BotConfig
 from polybot.strategies.base import MarketSnapshot
+from polybot.strategies.implication_detector import find_violations
 
 log = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ class Opportunity:
     """
 
     ts: float
-    kind: str            # "complement" | "negrisk_yes" | "negrisk_no"
+    kind: str            # "complement" | "negrisk_yes" | "negrisk_no" | "implication"
     market: str          # Marktfrage bzw. Event-Slug
     gross: float         # Brutto-Summe der besten Asks (Kosten pro Set)
     fees: float          # Taker-Gebühren pro Set (rate * p * (1-p) je Bein)
@@ -129,6 +130,23 @@ def find_opportunities(cfg: BotConfig, snap: MarketSnapshot,
         if not any(m.neg_risk_augmented for m in markets):
             add("negrisk_yes", slug, 1.0, yes_legs)
         add("negrisk_no", slug, float(len(markets) - 1), no_legs)
+
+    # Cross-Market-Implikationen (kind='implication'): reine Beobachtung —
+    # der Detektor erzeugt nie Signale, above_threshold ist deshalb immer
+    # False. Geloggt wird nur bei klarer Verletzung (net_edge > MARGIN),
+    # nicht ab EDGE_FLOOR — konsistente Paare wären nur Rauschen.
+    if cfg.strategy.detect_implications:
+        try:
+            for v in find_violations(cfg, snap):
+                out.append(Opportunity(
+                    ts=ts, kind="implication", market=v.label,
+                    gross=v.gross, fees=v.fees, net_edge=v.net_edge,
+                    depth=v.depth,
+                    theo_profit=max(0.0, v.net_edge) * v.depth,
+                    above_threshold=False,
+                ))
+        except Exception as e:  # noqa: BLE001 — Messpfad darf den Tick nie crashen
+            log.warning("Implikations-Detektor fehlgeschlagen: %s", e)
     return out
 
 
