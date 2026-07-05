@@ -6,6 +6,7 @@ import polybot.main as main
 from polybot.config import BotConfig
 from polybot.data.fees import FeeRateCache
 from polybot.data.gamma import Market
+from polybot.portfolio import Portfolio
 from polybot.risk import KillSwitch
 from polybot.strategies.base import MarketSnapshot
 
@@ -126,6 +127,9 @@ def test_cmd_run_bricht_bei_leerer_strategieliste_ab(monkeypatch):
 
 
 class NullLedger:
+    def __init__(self, path=None):
+        self.path = path
+
     """CycleLedger-Ersatz: cmd_run-Tests dürfen keinen echten PnL-Ledger
     nach data/pnl_ledger.jsonl schreiben (würde reale Messdaten verfälschen)."""
 
@@ -202,3 +206,46 @@ def test_cmd_run_stoppt_kompletten_bot_bei_killswitch(monkeypatch):
     cfg = BotConfig()
     cfg.strategy.stream_tick_s = 0.001
     main.cmd_run(cfg)  # kehrt zurück statt endlos weiterzulaufen
+
+
+# ---- Verifikations-Flotte Runde 2: Prozess-Befunde 23/36 --------------------
+
+
+def test_doppelstart_wird_verweigert(tmp_path, monkeypatch):
+    """Befund 23: zwei Prozesse auf demselben State zerschreiben sich
+    gegenseitig die Buchhaltung."""
+    import fcntl
+
+    monkeypatch.chdir(tmp_path)
+    lock = open("paper_state.json.lock", "w")
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)  # "anderer Prozess"
+    cfg = BotConfig()
+    with pytest.raises(SystemExit, match="Doppelstart"):
+        main.cmd_run(cfg)
+    lock.close()
+
+
+def test_snapshot_altersdeckel_pausiert_handel(monkeypatch):
+    """Befund 36: fällt der REST-Refresh dauerhaft aus, dürfen Stream-Ticks
+    nicht ewig gegen den alternden Snapshot handeln (Phantom-Klasse)."""
+    calls = []
+
+    class OldWorker:
+        def snapshot(self):
+            return MarketSnapshot(), 1
+
+        def snapshot_age(self, now=None):
+            return 9_999.0  # weit über dem Deckel
+
+    class CountingBroker:
+        def execute(self, *a, **k):
+            calls.append(1)
+            return 0
+
+    cfg = BotConfig()
+    monkeypatch.setattr(main.time, "sleep",
+                        lambda s: (_ for _ in ()).throw(KeyboardInterrupt))
+    with pytest.raises(KeyboardInterrupt):
+        main.stream_loop(cfg, OldWorker(), [], main.RiskManager(cfg),
+                         CountingBroker(), Portfolio(cash=100.0), None)
+    assert calls == []  # kein Tick gegen den veralteten Snapshot

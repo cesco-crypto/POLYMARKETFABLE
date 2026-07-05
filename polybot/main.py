@@ -462,10 +462,12 @@ def tick(cfg: BotConfig, snap: MarketSnapshot, strategies, risk: RiskManager,
                                         portfolio, snap.fee_rates)
         except Exception as e:  # noqa: BLE001 — Glattstellung nie tick-kritisch
             log.error("Waisen-Check fehlgeschlagen: %s", e)
-    risk.check_daily_loss(portfolio, marks)
     if ledger is not None:
-        # PnL-Ledger für den Cycle-Report (dedupliziert, crasht nie den Tick).
+        # PnL-Ledger für den Cycle-Report (dedupliziert, crasht nie den
+        # Tick) — VOR dem Loss-Check, damit auch der Breach-Tick im Ledger
+        # steht (Befund 42).
         ledger.record_tick(portfolio)
+    risk.check_daily_loss(portfolio, marks)
     return fills
 
 
@@ -564,7 +566,15 @@ class SnapshotWorker(threading.Thread):
         self._lock = threading.Lock()
         self._snap: MarketSnapshot | None = None
         self._version = 0
+        self._built_ts = 0.0
         self._stop = threading.Event()
+
+    def snapshot_age(self, now: float | None = None) -> float:
+        """Alter des letzten fertigen Snapshots in Sekunden (inf = keiner)."""
+        with self._lock:
+            if self._built_ts <= 0:
+                return float("inf")
+            return (time.time() if now is None else now) - self._built_ts
 
     def snapshot(self) -> tuple[MarketSnapshot | None, int]:
         """Letzter fertiger Snapshot + Versionszähler (atomar gelesen).
@@ -595,6 +605,7 @@ class SnapshotWorker(threading.Thread):
         with self._lock:
             self._snap = snap
             self._version += 1
+            self._built_ts = time.time()
         if self.streamer is not None:
             # Abo auf die Kandidaten des frischen Snapshots rotieren.
             # subscribe ist eine reine Zustandsänderung, zur Sicherheit
@@ -665,6 +676,19 @@ def stream_loop(cfg: BotConfig, worker: SnapshotWorker, strategies,
             continue
         fresh = version != last_version
         last_version = version
+        # Altersdeckel (Befund 36): Fällt der REST-Refresh dauerhaft aus,
+        # altern die Snapshot-Märkte unbegrenzt — Stream-Ticks würden dann
+        # abgelaufene Märkte handeln (die Phantom-Arb-Klasse vom 04.07.).
+        max_age = max(cfg.poll_interval_s * 3.0, 300.0)
+        age = worker.snapshot_age() if hasattr(worker, "snapshot_age") else 0.0
+        if age > max_age:
+            if time.time() - getattr(stream_loop, "_age_warned", 0.0) > 60:
+                stream_loop._age_warned = time.time()
+                log.error("Snapshot ist %.0fs alt (Deckel %.0fs) — Handel "
+                          "pausiert, bis der REST-Refresh wieder liefert",
+                          age, max_age)
+            time.sleep(interval)
+            continue
         streamed: dict[str, OrderBook] = {}
         if streamer is not None:
             try:
@@ -727,7 +751,22 @@ def cmd_scan(cfg: BotConfig) -> None:
     console.print(table)
 
 
+def _sigterm_to_interrupt(signum, frame):
+    """SIGTERM (systemd/kill/Container-Stop) wie Ctrl-C behandeln.
+
+    Verifikations-Befund 24: SIGTERM umging das finally in cmd_run —
+    kein cancel_all, kein Save, kein Shadow-Flush.
+    """
+    raise KeyboardInterrupt("SIGTERM")
+
+
 def cmd_run(cfg: BotConfig) -> None:
+    import signal
+
+    try:
+        signal.signal(signal.SIGTERM, _sigterm_to_interrupt)
+    except ValueError:
+        pass  # nicht im Main-Thread (Tests) — dann kein Handler
     if cfg.mode == "live":
         console.print("[bold red]LIVE-MODUS: Es wird mit echtem Geld gehandelt![/bold red]")
     else:
@@ -742,6 +781,20 @@ def cmd_run(cfg: BotConfig) -> None:
     # GETRENNTE State-Dateien: ein parallel laufender Paper-Messbot darf
     # niemals dieselbe Datei beschreiben wie die Live-Buchhaltung.
     state_path = "live_state.json" if cfg.mode == "live" else "paper_state.json"
+    # Doppelstart-Schutz (Befund 23): zwei Prozesse auf demselben State
+    # würden sich gegenseitig die Buchhaltung zerschreiben und die Orders
+    # canceln. Exklusives flock auf einer Lock-Datei, gehalten bis
+    # Prozessende (fd bleibt referenziert).
+    import fcntl
+
+    lock_file = open(f"{state_path}.lock", "w")  # noqa: SIM115 — lebt bis Prozessende
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        raise SystemExit(
+            f"Ein anderer Bot-Prozess hält {state_path}.lock — Doppelstart "
+            "auf demselben State ist nicht erlaubt (zuerst den laufenden "
+            "Prozess stoppen).") from None
     portfolio = Portfolio.load(state_path, start_cash=cfg.risk.paper_start_cash)
     broker = make_broker(cfg)
     syncer = None
@@ -779,7 +832,10 @@ def cmd_run(cfg: BotConfig) -> None:
     # PnL-Ledger (prozessübergreifend, data/pnl_ledger.jsonl): Basis für
     # `python -m polybot.main cycle-report` — der Messbot startet den Prozess
     # alle 90 Minuten frisch, die Fenster-Metriken brauchen deshalb Disk-State.
-    ledger = CycleLedger()
+    # Paper und Live führen GETRENNTE Ledger (Befund 37: gemischte
+    # Fenster-Deltas zweier Portfolios machen den cycle-report wertlos).
+    ledger = CycleLedger(path="data/pnl_ledger.live.jsonl"
+                         if cfg.mode == "live" else None)
     ledger.record_start(portfolio)
     # Live/Paper-Schattenvergleich (nur Live-Modus): pro Signal wird der
     # Live-Fill gegen einen Paper-Schattenlauf gemessen (data/shadow.jsonl);
@@ -843,7 +899,9 @@ def cmd_run(cfg: BotConfig) -> None:
 
 
 def cmd_status(cfg: BotConfig) -> None:
-    pf = Portfolio.load(start_cash=cfg.risk.paper_start_cash)
+    state_path = "live_state.json" if cfg.mode == "live" else "paper_state.json"
+    pf = Portfolio.load(state_path, start_cash=cfg.risk.paper_start_cash)
+    console.print(f"[dim]Modus {cfg.mode} — State {state_path}[/dim]")
     console.print(f"Cash: {pf.cash:.2f} USDC | realisierter PnL: {pf.realized_pnl:+.2f} | "
                   f"Gebühren: {pf.fees_paid:.2f} | Rebates: {pf.rebates_earned:.2f} | "
                   f"Positionen: {len(pf.positions)} | Fills: {len(pf.fills)} | "

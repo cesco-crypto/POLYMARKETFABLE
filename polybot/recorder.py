@@ -222,16 +222,23 @@ class OpportunityRecorder:
         if size <= self.MAX_BYTES:
             return
         keep = self.MAX_BYTES // 2
+        # Alten Teil ARCHIVIEREN statt verwerfen (Verifikations-Befund 41:
+        # report/cycle-report werten Tagesfenster aus — ein hart gekapptes
+        # Log kippt die Zahlen ins Optimistische). Das Archiv (.1) wird bei
+        # der nächsten Rotation überschrieben -> Diskbedarf bleibt begrenzt.
+        archive = self.path.with_suffix(".jsonl.1")
+        os.replace(self.path, archive)
         tmp = self.path.with_suffix(".rotate")
-        with self.path.open("rb") as src:
+        with archive.open("rb") as src:
             src.seek(size - keep)
             src.readline()  # angerissene Zeile verwerfen
             with tmp.open("wb") as dst:
                 while chunk := src.read(1 << 20):
                     dst.write(chunk)
         os.replace(tmp, self.path)
-        log.warning("Opportunity-Log rotiert: %.1f GB -> %.2f GB (Deckel %.1f GB)",
-                    size / 1e9, keep / 1e9, self.MAX_BYTES / 1e9)
+        log.warning("Opportunity-Log rotiert: %.1f GB -> %.2f GB aktiv, "
+                    "Rest archiviert in %s (Deckel %.1f GB)",
+                    size / 1e9, keep / 1e9, archive.name, self.MAX_BYTES / 1e9)
 
 
 # ---- Report-Aggregation (python -m polybot.main report) --------------------

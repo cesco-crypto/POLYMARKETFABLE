@@ -76,8 +76,8 @@ class CycleLedger:
     Prinzip wie beim OpportunityRecorder).
     """
 
-    def __init__(self, path: str | Path = DEFAULT_LEDGER_PATH):
-        self.path = Path(path)
+    def __init__(self, path: str | Path | None = None):
+        self.path = Path(path) if path is not None else Path(DEFAULT_LEDGER_PATH)
         self._last: dict | None = None  # zuletzt geschriebene Zähler
         self._last_ts: float = 0.0
 
