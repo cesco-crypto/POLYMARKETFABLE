@@ -1,0 +1,59 @@
+# OpenWiki-Wiki automatisch aktuell halten (offizielle Vorlage:
+# github.com/langchain-ai/openwiki, examples/openwiki-update.yml).
+#
+# Voraussetzung: EIN Modell-API-Key als Repo-Secret (Settings → Secrets
+# and variables → Actions): ANTHROPIC_API_KEY ODER OPENROUTER_API_KEY.
+# Ohne Secret schlägt der Lauf fehl — die Wiki bleibt dann einfach auf
+# dem letzten Stand (kein Schaden im Bot).
+#
+# Sicherheitsleitplanke: Der Doc-Agent liest das Repo und schreibt NUR
+# nach openwiki/ (add-paths unten erzwingt das beim PR) — Secrets,
+# Wallet-Keys o.ä. gehören nie in die Wiki (siehe CLAUDE.md).
+
+name: OpenWiki Update
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * *" # täglich 06:00 UTC
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install OpenWiki
+        run: npm install --global openwiki
+
+      - name: Run OpenWiki
+        run: openwiki --update --print
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+
+      - name: Create OpenWiki update pull request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          add-paths: openwiki
+          branch: openwiki/update
+          commit-message: "docs: update OpenWiki"
+          title: "docs: update OpenWiki"
+          body: |
+            Automatisches OpenWiki-Dokumentations-Update.
+
+            Erzeugt vom geplanten OpenWiki-Workflow. Bitte prüfen, ob die
+            Änderungen dem aktuellen Code entsprechen — bei Widerspruch
+            gilt immer der Code.

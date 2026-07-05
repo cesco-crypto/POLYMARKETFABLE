@@ -26,3 +26,9 @@ paper_state.json
 paper_state.fills.jsonl
 paper_state.tmp
 live_state.json
+live_state.fills.jsonl
+live_state.tmp
+
+# OpenWiki-Laufzeitdateien (Wiki selbst wird committet)
+openwiki/.env
+openwiki/_plan.md

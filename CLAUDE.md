@@ -42,3 +42,26 @@ iteriert. Konkret heißt das hier:
   `.venv/bin/python -m pytest tests/ -q`
 - Messdaten (paper_state.json, data/) sind git-ignoriert; Erkenntnisse
   gehören in REPORT.md (committen + pushen — Container sind flüchtig).
+
+## OpenWiki usage rule
+
+This repository uses OpenWiki for agent-readable documentation.
+
+Before making non-trivial changes, especially in trading, execution,
+websocket, orderbook, risk, wallet, settlement, or backtesting code:
+
+1. Read the relevant files inside `/openwiki`.
+2. Then inspect the actual source files.
+3. If `/openwiki` and source code disagree, source code is the source of truth.
+4. Do not add secrets, API keys, private keys, wallet seeds, tokens, or
+   credentials to `/openwiki`.
+5. After architectural changes, run `openwiki --update` — or update the
+   betroffenen Wiki-Seiten direkt, wenn kein Modell-API-Key verfügbar ist
+   (z.B. in dieser Claude-Code-Umgebung).
+6. Never modify live trading, execution, wallet, or risk-limit code without
+   explaining the impact and proposing tests first.
+
+Einstieg: `openwiki/quickstart.md` (Landkarte aller Module und Seiten).
+Die tägliche Auto-Aktualisierung läuft über
+`.github/workflows/openwiki-update.yml` (braucht ANTHROPIC_API_KEY oder
+OPENROUTER_API_KEY als Repo-Secret).
