@@ -7,6 +7,8 @@
   python -m polybot.main report          # Opportunity-Log auswerten (--target)
   python -m polybot.main cycle-report    # kompakte Zyklus-Selbstauswertung
   python -m polybot.main capture-report  # Live/Paper-Schattenvergleich auswerten
+  python -m polybot.main preflight       # Go-Live-Startstrecke (EOA) prüfen
+  python -m polybot.main preflight --execute  # ... und wirklich ausführen
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ from polybot.data.orderbook import BookClient, Level, OrderBook
 from polybot.data.stream import BookStreamer
 from polybot.execution import make_broker
 from polybot.portfolio import Portfolio
+from polybot.preflight import cmd_preflight
 from polybot.recorder import (OpportunityRecorder, aggregate,
                               load_opportunities, required_capital)
 from polybot.shadow import (DEFAULT_SHADOW_PATH, ShadowTracker,
@@ -830,12 +833,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="polybot")
     parser.add_argument("command",
                         choices=["scan", "run", "status", "report",
-                                 "cycle-report", "capture-report"])
+                                 "cycle-report", "capture-report", "preflight"])
     # default=None: BotConfig.load unterscheidet so zwischen explizit gesetztem
     # --config (Datei MUSS existieren) und implizitem config.yaml-Fallback.
     parser.add_argument("--config", default=None)
     parser.add_argument("--target", type=float, default=1000.0,
                         help="Zielprofit in USDC/Tag für die Kapitalfrage (report)")
+    parser.add_argument("--execute", action="store_true",
+                        help="preflight: Transaktionen wirklich senden "
+                             "(Default: nur prüfen und PLAN drucken)")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -846,6 +852,9 @@ def main() -> None:
     cfg = BotConfig.load(args.config)
     if args.command == "report":
         cmd_report(cfg, target=args.target)
+        return
+    if args.command == "preflight":
+        cmd_preflight(cfg, execute=args.execute)
         return
     {"scan": cmd_scan, "run": cmd_run, "status": cmd_status,
      "cycle-report": cmd_cycle_report,
