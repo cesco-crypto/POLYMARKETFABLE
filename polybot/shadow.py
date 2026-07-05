@@ -70,9 +70,10 @@ class ShadowRecord:
     geloggt war paper_notional ~60x aufgeblasen und die Capture-Quote
     strukturell gegen 0 gedrückt. Jetzt gilt: EINE Episode = eine
     zusammenhängend signalisierende Gelegenheit (Gruppen-Identität, endet
-    nach EPISODE_GAP_S Stille). paper_fill ist die grösste Einzel-Tick-
-    Füllung des Schattens (das einmalig nehmbare Angebot), live_fill die
-    Summe aller Live-Fills der Episode.
+    nach EPISODE_GAP_S Stille). paper_fill ist die SUMME der (durch den
+    Liquiditätsverbrauch des PaperBrokers bereits deduplizierten)
+    Schatten-Fills der Episode, live_fill die Summe aller Live-Fills —
+    symmetrische Zähler, damit die Quote unverzerrt ist.
     """
 
     ts: float               # Episodenbeginn
@@ -111,7 +112,10 @@ class _Leg:
     reason: str
     group: str | None
     expected_edge: float
-    paper_best: float = 0.0   # grösste Einzel-Tick-Füllung des Schattens
+    paper_total: float = 0.0  # Summe der Schatten-Fills der Episode (der
+                              # Schatten-Broker dedupliziert Liquidität seit
+                              # Fix 3 selbst — ein zweiter Fill heisst echte
+                              # neue Liquidität, symmetrisch zu live_total)
     live_total: float = 0.0   # Summe aller Live-Fills der Episode
 
 
@@ -202,7 +206,7 @@ class ShadowTracker:
             # Beins zurechnen, sonst fehlt genau der Fill, den wir messen.
             for (token, side, reason), size in live_avail.items():
                 if size > 1e-9:
-                    self._feed_stray_live(token, side, reason, size)
+                    self._feed_stray_live(token, side, reason, size, ts)
             if records:
                 self._write(records)
             # Historie kappen — der Schatten läuft potenziell tagelang.
@@ -239,24 +243,46 @@ class ShadowTracker:
                        size=s.size, reason=s.reason, group=s.group,
                        expected_edge=s.expected_edge)
             ep.legs[legkey] = leg
-        # Angebot = grösste Einzel-Tick-Füllung (das einmalig Nehmbare) —
-        # NICHT die Summe über Ticks (das war die 60x-Inflation).
-        leg.paper_best = max(leg.paper_best, paper)
+        # Symmetrisch zu live_total SUMMIEREN: die Schatten-Fills sind durch
+        # PaperBroker._consumed_levels bereits liquiditäts-dedupliziert —
+        # ein weiterer Fill innerhalb der Episode heisst echte neue
+        # Liquidität (max wäre asymmetrisch und bläht die Quote auf,
+        # Verifikations-Flotte Befund 4).
+        leg.paper_total += paper
+        if paper > 1e-9 and s.expected_edge > leg.expected_edge:
+            # Edge/Größe des ergiebigsten Fill-Ticks statt eingefroren aus
+            # Tick 1 (Befund 8) — die Hochrechnung bewertet sonst Fills aus
+            # Tick k mit dem Edge von Tick 1.
+            leg.expected_edge = s.expected_edge
+            leg.size = s.size
         leg.live_total += live
 
     def _feed_stray_live(self, token: str, side: str, reason: str,
-                         size: float) -> None:
+                         size: float, ts: float) -> None:
         """Live-Fill ohne Signal in diesem Tick der offenen Episode zuordnen.
 
         Der reason des Fills stammt vom Ursprungs-Tick (mit dessen
-        Edge-Wert) — zugeordnet wird über (token, side); reason dient nur
-        noch der Diagnose.
+        Edge-Wert). Zuordnung zweistufig (Befund 7): zuerst Episoden,
+        deren Bein zur STRATEGIE des Fills passt, dann (token, side)
+        allein. Ein Treffer hält die Episode am Leben (Befund 6: GTC-Fills
+        kommen auch nach >30s Signal-Stille). Ohne Treffer entsteht eine
+        synthetische Einzel-Bein-Episode (paper=0, Quote None) — der Fill
+        bleibt sichtbar statt still zu verschwinden.
         """
-        for ep in self._episodes.values():
-            leg = ep.legs.get(f"{token}|{side}")
-            if leg is not None:
-                leg.live_total += size
-                return
+        strat = strategy_from_reason(reason)
+        legkey = f"{token}|{side}"
+        candidates = [ep for ep in self._episodes.values() if legkey in ep.legs]
+        preferred = [ep for ep in candidates
+                     if strategy_from_reason(ep.legs[legkey].reason) == strat]
+        for ep in preferred or candidates:
+            ep.legs[legkey].live_total += size
+            ep.last_ts = max(ep.last_ts, ts)
+            return
+        ep = _Episode(first_ts=ts, last_ts=ts, ticks=1)
+        ep.legs[legkey] = _Leg(token_id=token, side=side, price=0.0,
+                               size=size, reason=reason, group=None,
+                               expected_edge=0.0, live_total=size)
+        self._episodes[f"stray|{token}|{side}|{ts}"] = ep
 
     def _close_due(self, now: float, force: bool = False) -> list[ShadowRecord]:
         """Abgelaufene Episoden schliessen und als je 1 Record/Bein ausgeben."""
@@ -267,14 +293,14 @@ class ShadowTracker:
                     and (now - ep.first_ts) < self.EPISODE_MAX_S:
                 continue
             for leg in ep.legs.values():
-                ratio = (leg.live_total / leg.paper_best
-                         if leg.paper_best > 1e-9 else None)
+                ratio = (leg.live_total / leg.paper_total
+                         if leg.paper_total > 1e-9 else None)
                 out.append(ShadowRecord(
                     ts=ep.first_ts, token_id=leg.token_id, side=leg.side,
                     price=leg.price, size=leg.size, reason=leg.reason,
                     strategy=strategy_from_reason(leg.reason), group=leg.group,
                     expected_edge=leg.expected_edge,
-                    paper_fill=leg.paper_best, live_fill=leg.live_total,
+                    paper_fill=leg.paper_total, live_fill=leg.live_total,
                     capture_ratio=ratio, episode_ticks=ep.ticks,
                     episode_s=ep.last_ts - ep.first_ts))
             del self._episodes[key]
@@ -367,8 +393,15 @@ def aggregate_capture(rows: list[dict]) -> dict:
         for b in (overall, by_strategy.setdefault(strat, _bucket()),
                   by_hour.setdefault(hour, _bucket())):
             b["n"] += 1
-            b["paper_notional"] += paper * price
-            b["live_notional"] += live * price
+            if paper > 1e-9:
+                b["paper_notional"] += paper * price
+                b["live_notional"] += live * price
+            else:
+                # Live-Fill ohne Paper-Gegenstück (Schatten-Limitierung,
+                # Stray-Episode): NICHT in den Quoten-Zähler (Befund 5),
+                # aber als Diagnose ausweisen.
+                b["stray_live_notional"] = (b.get("stray_live_notional", 0.0)
+                                            + live * price)
         size = r.get("size", 0.0)
         if size > 0 and paper > 0:
             # min(…, 1.0): ein Paper-Fill über Signalgröße kommt nicht vor,

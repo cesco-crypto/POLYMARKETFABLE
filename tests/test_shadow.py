@@ -288,7 +288,11 @@ def test_episode_dedup_hundert_ticks_ergeben_einen_datensatz(tmp_path):
     assert len(recs) == 1
     assert recs[0].episode_ticks == 100
     assert recs[0].episode_s == pytest.approx(49.5)
-    assert recs[0].paper_fill == pytest.approx(10.0)   # Angebot, keine Summe
+    # paper_fill = Episoden-SUMME der liquiditäts-deduplizierten Fills:
+    # das Buch bot 100 Shares Tiefe, der Schatten konsumiert sie über die
+    # ersten 10 Ticks vollständig, danach füllt das unveränderte Level
+    # nichts mehr (nicht 100 Ticks x 10 = 1000 — DAS war die Inflation).
+    assert recs[0].paper_fill == pytest.approx(100.0)
     assert recs[0].capture_ratio == pytest.approx(0.0)
 
 
