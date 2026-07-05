@@ -31,6 +31,7 @@ from polybot.data.gamma import GammaClient, Market
 from polybot.data.orderbook import BookClient, Level, OrderBook
 from polybot.data.stream import BookStreamer
 from polybot.execution import make_broker
+from polybot.orphan import OrphanFlattener
 from polybot.portfolio import Portfolio
 from polybot.preflight import cmd_preflight
 from polybot.recorder import (OpportunityRecorder, aggregate,
@@ -390,7 +391,8 @@ def tick(cfg: BotConfig, snap: MarketSnapshot, strategies, risk: RiskManager,
          broker, portfolio: Portfolio,
          recorder: OpportunityRecorder | None = None,
          ledger: CycleLedger | None = None,
-         shadow: ShadowTracker | None = None) -> int:
+         shadow: ShadowTracker | None = None,
+         flattener: OrphanFlattener | None = None) -> int:
     snap.portfolio = portfolio  # Inventar-Sicht für Strategien (Market Making)
     # Marks (Midpoints) für den Kill-Switch: ohne sie wären unrealisierte
     # Verluste unsichtbar. Prüfung VOR der Ausführung, damit im Breach-Tick
@@ -430,6 +432,18 @@ def tick(cfg: BotConfig, snap: MarketSnapshot, strategies, risk: RiskManager,
         merger = getattr(broker, "merger", None)
         if merger is not None:
             live_merge_positions(snap, portfolio, merger, ledger)
+    if flattener is not None:
+        # Waisen-Detektor: NACH den Merges (vollständige Paare sind dann weg)
+        # ungehedgte Einzelbeine zum Bid glattstellen. Die SELLs reduzieren
+        # ausschließlich Bestand und Risiko — sie umgehen deshalb bewusst
+        # risk.filter (das nur Käufe limitiert); crasht nie den Tick.
+        try:
+            extra, extra_books = flattener.signals(snap, portfolio)
+            if extra:
+                fills += broker.execute(extra, {**snap.books, **extra_books},
+                                        portfolio, snap.fee_rates)
+        except Exception as e:  # noqa: BLE001 — Glattstellung nie tick-kritisch
+            log.error("Waisen-Check fehlgeschlagen: %s", e)
     risk.check_daily_loss(portfolio, marks)
     if ledger is not None:
         # PnL-Ledger für den Cycle-Report (dedupliziert, crasht nie den Tick).
@@ -604,7 +618,8 @@ def stream_loop(cfg: BotConfig, worker: SnapshotWorker, strategies,
                 recorder: OpportunityRecorder | None = None,
                 ledger: CycleLedger | None = None,
                 shadow: ShadowTracker | None = None,
-                state_path: str = "paper_state.json") -> None:
+                state_path: str = "paper_state.json",
+                flattener: OrphanFlattener | None = None) -> None:
     """Endloser Inner-Loop gegen den Doppelpuffer des SnapshotWorkers.
 
     Läuft UNUNTERBROCHEN — der REST-Refresh passiert parallel im Worker,
@@ -646,7 +661,7 @@ def stream_loop(cfg: BotConfig, worker: SnapshotWorker, strategies,
             got = 0
             try:
                 got = tick(cfg, fast, strategies, risk, broker, portfolio,
-                           recorder, ledger, shadow)
+                           recorder, ledger, shadow, flattener)
             except KillSwitch:
                 raise
             except Exception as e:  # noqa: BLE001 — Netzwerk/Broker-Fehler überleben
@@ -731,6 +746,13 @@ def cmd_run(cfg: BotConfig) -> None:
     # Live-Fill gegen einen Paper-Schattenlauf gemessen (data/shadow.jsonl);
     # Auswertung: python -m polybot.main capture-report
     shadow = ShadowTracker(cfg) if cfg.mode == "live" else None
+    # Waisen-Detektor (Live-Befund 05.07.2026): ungehedgte Einzelbeine nach
+    # Schonfrist zum Bid glattstellen — der Bot hält keine Richtungswetten.
+    flattener = None
+    if cfg.risk.flatten_orphan_grace_s > 0:
+        flattener = OrphanFlattener(cfg, books=books)
+        console.print(f"[green]Waisen-Detektor aktiv — Schonfrist "
+                      f"{cfg.risk.flatten_orphan_grace_s:.0f}s.[/green]")
 
     # WebSocket-Streaming (optional): scheitert der Start (z.B. fehlende
     # Bibliothek), läuft der Bot unverändert im reinen REST-Betrieb weiter.
@@ -753,7 +775,8 @@ def cmd_run(cfg: BotConfig) -> None:
     worker.start()
     try:
         stream_loop(cfg, worker, strategies, risk, broker, portfolio,
-                    streamer, recorder, ledger, shadow, state_path=state_path)
+                    streamer, recorder, ledger, shadow, state_path=state_path,
+                    flattener=flattener)
     except KillSwitch as e:
         console.print(f"[bold red]{e}[/bold red]")
     except KeyboardInterrupt:

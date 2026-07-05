@@ -51,6 +51,12 @@ class RiskConfig:
     # Konfigurationsfehler wie "maker address not allowed" sperren unabhängig
     # davon dauerhaft bis zum Prozessende (siehe execution.LiveBroker).
     order_reject_cooldown_s: float = 60.0
+    # Waisen-Detektor (polybot/orphan.py): ungehedgte Einzelbeine nach so
+    # vielen Sekunden Schonfrist zum Bid glattstellen; 0 = aus. Die Frist
+    # muss das Delayed-Order-Poll-Fenster (15s) plus einen Reconcile-Tick
+    # überdauern — sonst würde ein noch schwebendes Gegenbein fälschlich
+    # verkauft. Nicht mit aktivem Market Making kombinieren (Inventar!).
+    flatten_orphan_grace_s: float = 0.0
 
 
 @dataclass
@@ -215,6 +221,15 @@ class BotConfig:
         if cfg.risk.order_reject_cooldown_s < 0:
             raise SystemExit("risk.order_reject_cooldown_s darf nicht negativ "
                              "sein (0 = Cooldown aus)")
+        if cfg.risk.flatten_orphan_grace_s < 0:
+            raise SystemExit("risk.flatten_orphan_grace_s darf nicht negativ "
+                             "sein (0 = Waisen-Detektor aus)")
+        if cfg.risk.flatten_orphan_grace_s > 0 \
+                and "market_making" in cfg.strategy.enabled:
+            raise SystemExit(
+                "risk.flatten_orphan_grace_s und market_making schließen sich "
+                "aus: MM-Inventar ist absichtlich einbeinig, der Waisen-"
+                "Detektor würde es glattstellen")
         cfg.private_key = os.environ.get("POLY_PRIVATE_KEY")
         cfg.funder_address = os.environ.get("POLY_FUNDER_ADDRESS")
         try:

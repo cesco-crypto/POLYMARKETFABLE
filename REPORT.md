@@ -87,3 +87,50 @@ Hinweis zur `report`-Ausgabe: Die «benötigtes Arbeitskapital»-Zahl misst nur
 das *gleichzeitig* gebundene Kapital pro Gelegenheit (durch Sofort-Merges
 minimal); praktisch relevant sind Positions-/Exposure-Limits in
 `config.paper.yaml` — aktuell 500/2'000/20'000 USDC.
+
+---
+
+## Nachtrag 05.07.2026: Live-Befunde Tag 1 und ihre Konsequenzen
+
+### Befund 1: In-play-Märkte sind der grösste, aber vergiftete Teil des Pools
+
+Messung (Tail von `data/opportunities.jsonl`, ~8h, 147 Märkte, 35'005 USDC
+theoretischer Komplement-Arb-Profit), gekreuzt mit Gamma-Metadaten
+(gameStartTime, secondsDelay):
+
+| Marktklasse | Anteil am theo. Profit | Märkte |
+|---|---|---|
+| In-play Sport/Esports (Spiel läuft, Matching-Delay aktiv) | **49.9 %** | 33 |
+| «Unbekannt» (Map-Winner/Over-Under-Esports — de facto auch in-play) | 21.8 % | 11 |
+| Krypto Up/Down (5-Min/15-Min/1h-Fenster) | 21.4 % | 98 |
+| Sport vor Spielbeginn | 6.4 % | 3 |
+| Sonstige | 0.5 % | 2 |
+
+**Wie könnte diese Zahl lügen?** Sie tut es — genau das ist der Punkt: Der
+theoretische Profit auf In-play-Märkten ist für Taker praktisch nicht
+einnehmbar. Der serverseitige Matching-Delay (1-5s) macht jede Taker-Order
+zu einem Cancel-Race; beide echten Live-Fills des Tages entstanden genau so
+und endeten als ungehedgte Einzelbeine. ~70 % des Paper-Pools sind also
+Fata Morgana für unsere Taker-Strategie. Konsequenz: der In-play-Filter
+(Commit 77d1a66) schneidet sie bewusst weg. Was bleibt und real handelbar
+ist: Krypto-Up/Down-Fenster (~21 %) und Vor-Spiel-Sport (~6 %).
+
+### Befund 2: Ungehedgte Einzelbeine («Waisen») — Detektor + Auto-Glattstellung
+
+Dreimal hinterliess der Live-Tag einbeinige Positionen (FaZe-Handicap,
+ITF-Tennis, Valorant/O-U) — alle drei endeten zufällig im Plus (+29 USDC),
+was der Lehrsatz vom 04.07. verbietet zu feiern: dieselbe Mechanik liefert
+genauso −29. Deshalb neu (`polybot/orphan.py`):
+
+- **Waisen-Detektor:** vergleicht pro Tick den Bestand mit der über alle
+  je gesehenen Snapshots gelernten YES/NO-Paar-Karte (wichtig: die Märkte,
+  auf denen Waisen entstehen, fliegen aus dem nächsten Snapshot — eine
+  Nur-Snapshot-Sicht wäre auf dem Hauptfall blind).
+- **Auto-Glattstellung:** Überhänge werden nach 60s Schonfrist (länger als
+  das Delayed-Order-Poll-Fenster von 15s) zum besten Bid verkauft — immer,
+  nicht nur im Gewinn. Fehlt das Buch im Snapshot, holt der Detektor den
+  Bid per Batch-Preisabfrage; ohne Bid wird beobachtet, nicht geraten.
+- Nicht angefasst: vollständige Paare, NegRisk-Tokens (Phase 2),
+  MM-Inventar (Kombination per Config-Check verboten), Staub < 1 USDC.
+- Aktiv in `config.live.yaml` (`flatten_orphan_grace_s: 60`); im
+  Paper-Messbetrieb aus, damit die Messreihe vergleichbar bleibt.

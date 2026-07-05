@@ -24,6 +24,10 @@ risk:
   paper_start_cash: 600       # knapp UNTER dem echten pUSD-Guthaben (602.94):
                               # der Cash-Deckungscheck gibt nie mehr frei als real da ist
   taker_fee_rate: 0.07
+  flatten_orphan_grace_s: 60   # Waisen-Detektor: ungehedgte Einzelbeine nach
+                               # 60s Schonfrist zum Bid verkaufen (Befund
+                               # 05.07.: Delay-Races hinterlassen offene
+                               # Richtungswetten). Frist > Poll-Fenster 15s.
   live_auto_merge: false       # AUS bis Merges als Deposit-Wallet-Batch laufen:
                                # die Token liegen nach dem V2-Flow im Deposit
                                # Wallet, ein Merge vom EOA würde nur fehlschlagen.
