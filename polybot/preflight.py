@@ -117,6 +117,12 @@ ERC20_ABI = [
                    {"name": "amount", "type": "uint256"}],
         "outputs": [{"name": "", "type": "bool"}],
     },
+    {
+        "name": "transfer", "type": "function", "stateMutability": "nonpayable",
+        "inputs": [{"name": "to", "type": "address"},
+                   {"name": "amount", "type": "uint256"}],
+        "outputs": [{"name": "", "type": "bool"}],
+    },
 ]
 
 # SwapRouter02: exactInputSingle OHNE deadline-Feld (anders als der V1-Router).

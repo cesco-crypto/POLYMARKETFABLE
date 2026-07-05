@@ -522,20 +522,28 @@ class LiveBroker(Broker):
         # FOK sichert nur die Einzelorder, nicht die Arb-Gruppe: scheitert ein
         # Bein, dürfen die restlichen Beine der Gruppe nicht mehr raus.
         failed_groups: set[str] = set()
+        quiet_groups: set[str] = set()  # per Cooldown übersprungen: kein Log-Spam
         group_fills: dict[str, list[Fill]] = {}  # gebuchte Beine je Gruppe (für Unwind)
         refreshed: set[str] = set()  # Tokens, deren Alt-Quotes dieser Tick schon gecancelt sind
         for s in signals:
             if s.group and s.group in failed_groups:
-                log.warning("Gruppe %s: Bein %s übersprungen, da ein voriges Bein scheiterte",
-                            s.group, s.token_id[:12])
+                if s.group in quiet_groups:
+                    log.debug("Gruppe %s: Bein %s übersprungen (Cooldown-Gruppe)",
+                              s.group, s.token_id[:12])
+                else:
+                    log.warning("Gruppe %s: Bein %s übersprungen, da ein voriges "
+                                "Bein scheiterte", s.group, s.token_id[:12])
                 continue
             if self._fatal_reject is not None or self._token_blocked(s.token_id):
                 # Reject-Cooldown bzw. mid-Tick erkannter Konfigurationsfehler:
-                # dieselbe Order würde nur wieder abgelehnt.
+                # dieselbe Order würde nur wieder abgelehnt. Kein ERROR-Log —
+                # der Grund stand beim Verhängen des Cooldowns bereits im Log,
+                # und dieser Zweig feuert sonst jeden 0.5s-Tick erneut.
                 log.debug("Token %s im Reject-Cooldown — Signal übersprungen",
                           s.token_id[:12])
                 if s.group:
-                    self._abort_group(s, failed_groups)
+                    failed_groups.add(s.group)
+                    quiet_groups.add(s.group)
                     fills += self._unwind_group(s.group, group_fills, books,
                                                 portfolio, fee_rates)
                 continue

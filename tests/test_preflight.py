@@ -619,3 +619,17 @@ def test_main_preflight_ohne_key_exit_code_1(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         main.main()
     assert exc.value.code == 1
+
+
+def test_erc20_abi_kann_transfer_encodieren():
+    """Regressionstest 05.07.: preflight --execute brach mit "ABI Not Found:
+    transfer" ab — das Minimal-ABI enthielt kein transfer(address,uint256)."""
+    from web3 import Web3
+    from polybot.preflight import ERC20_ABI
+    c = Web3().eth.contract(
+        address="0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB", abi=ERC20_ABI)
+    data = c.encode_abi("transfer",
+                        ["0xd651247C926E627fC87A859b97c1CC885ca219ec", 123])
+    assert data.startswith("0xa9059cbb")  # Selector von transfer(address,uint256)
+    fn = c.functions.transfer("0xd651247C926E627fC87A859b97c1CC885ca219ec", 123)
+    assert fn is not None
