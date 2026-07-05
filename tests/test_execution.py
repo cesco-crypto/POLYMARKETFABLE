@@ -42,6 +42,7 @@ class FakeClobClient:
         self.posted: list[str] = []               # token_ids in Sendereihenfolge
         self.posted_types: list[str] = []         # zugehörige OrderTypes
         self.created_prices: list[float] = []     # an create_order übergebene Preise
+        self.created_sizes: list[float] = []      # an create_order übergebene Sizes
         self.created_ticks: list = []             # explizit übergebene tick_size-Optionen
         self.cancelled: list[str] = []            # gecancelte Order-IDs
         self.orders: dict[str, dict] = {}         # get_order-Antworten je orderID
@@ -53,6 +54,7 @@ class FakeClobClient:
 
     def create_order(self, args, options=None):
         self.created_prices.append(args.price)
+        self.created_sizes.append(args.size)
         self.created_ticks.append(options.tick_size if options else None)
         return {"token_id": args.token_id, "price": args.price, "size": args.size}
 
@@ -985,3 +987,49 @@ def test_paperbroker_fallback_fee_rate_aus_config():
     sig = Signal(token_id="tok", side="BUY", price=0.50, size=10, reason="test")
     broker.execute([sig], {"tok": book}, pf)
     assert pf.cash == pytest.approx(100.0 - 5.0 - 10 * 0.07 * 0.25)
+
+
+# ---- Market-Order-Präzision (CLOB: "invalid amounts", 05.07.2026 live) ----------
+
+def test_marketable_size_haelt_clob_praezision_ein():
+    from polybot.execution import _marketable_size
+    # BUY: Size*Preis darf max. 2 Nachkommastellen haben.
+    assert _marketable_size(21.0, 0.43, "BUY") == pytest.approx(21.0)   # 9.03 ok
+    assert _marketable_size(21.0, 0.435, "BUY") == pytest.approx(20.0)  # 9.135 -> 8.70
+    assert _marketable_size(5.55, 0.31, "BUY") == pytest.approx(5.0)    # 1.7205 -> 1.55
+    # SELL: Size*Preis darf max. 4 Nachkommastellen haben (lockerer).
+    assert _marketable_size(21.0, 0.435, "SELL") == pytest.approx(21.0)
+    # Keine gültige Size unterhalb -> 0 (Order wird verworfen statt abgelehnt).
+    assert _marketable_size(1.0, 0.435, "BUY") == pytest.approx(0.0)
+    assert _marketable_size(0.0, 0.43, "BUY") == pytest.approx(0.0)
+
+
+def test_fok_gruppe_wird_auf_gemeinsame_konforme_size_quantisiert():
+    client = FakeClobClient()
+    broker = make_live_broker(client)
+    pf = Portfolio(cash=1000.0)
+    legs = [
+        Signal(token_id="yes", side="BUY", price=0.43, size=10.5,
+               reason="arb", group="g1"),
+        Signal(token_id="no", side="BUY", price=0.57, size=10.5,
+               reason="arb", group="g1"),
+    ]
+    books = {t: OrderBook(token_id=t, bids=[], asks=[Level(0.99, 100)])
+             for t in ("yes", "no")}
+    assert broker.execute(legs, books, pf) == 2
+    # 10.5*0.43=4.5150 (4 NK) wäre abgelehnt worden -> beide Beine auf 10.0.
+    assert client.created_sizes == [pytest.approx(10.0), pytest.approx(10.0)]
+
+
+def test_fok_gruppe_ohne_konforme_size_wird_verworfen():
+    client = FakeClobClient()
+    broker = make_live_broker(client)
+    pf = Portfolio(cash=1000.0)
+    # Preis 0.435 gibt es bei Tick 0.01 nicht — der Fake-Client liefert Tick
+    # 0.01, also quantisiert der Vorlauf auf 0.43: dafür ist 0.5 zu klein
+    # (kleinste konforme Size ist 1.0 bei p=0.43).
+    legs = [Signal(token_id="yes", side="BUY", price=0.43, size=0.5,
+                   reason="arb", group="g1")]
+    books = {"yes": OrderBook(token_id="yes", bids=[], asks=[Level(0.99, 100)])}
+    assert broker.execute(legs, books, pf) == 0
+    assert client.posted == []  # nichts gesendet, nichts abgelehnt

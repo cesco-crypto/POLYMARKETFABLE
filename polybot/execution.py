@@ -47,6 +47,24 @@ def _quantize_price(price: float, tick: float, side: str) -> float:
     return round(min(max(q, tick), 1.0 - tick), 6)
 
 
+def _marketable_size(size: float, price: float, side: str) -> float:
+    """Größte Size <= size (Raster 0.01), deren Beträge die CLOB-Präzision einhalten.
+
+    FOK/FAK prüft der Server als Market-Order: bei BUY darf der USDC-Betrag
+    (Size*Preis) max. 2 Nachkommastellen haben, bei SELL max. 4; die
+    Share-Menge selbst max. 2. Der Preis ist hier bereits aufs Tick-Raster
+    quantisiert (max. 6 Nachkommastellen), daher exakt als Ganzzahl fassbar.
+    """
+    p = int(round(price * 1_000_000))
+    if p <= 0 or size <= 0:
+        return 0.0
+    mod = 1_000_000 if side == "BUY" else 10_000
+    k = int(math.floor(size * 100 + 1e-9))
+    while k > 0 and (k * p) % mod:
+        k -= 1
+    return k / 100
+
+
 def _to_float(v) -> float:
     """Response-Feld (String/None/Zahl) defensiv in float wandeln."""
     try:
@@ -497,6 +515,10 @@ class LiveBroker(Broker):
                 log.debug("%d Signal(e) verworfen — Orders gesperrt seit: %s",
                           len(signals), self._fatal_reject)
             return fills
+        # Arb-Gruppen vorab auf eine gemeinsame, börsenkonforme Size bringen
+        # (CLOB-Präzisionsregeln für Market-Orders; Beine müssen gleich groß
+        # bleiben, sonst bliebe ein ungehedgter Rest).
+        signals = self._quantize_fok_groups(signals)
         # FOK sichert nur die Einzelorder, nicht die Arb-Gruppe: scheitert ein
         # Bein, dürfen die restlichen Beine der Gruppe nicht mehr raus.
         failed_groups: set[str] = set()
@@ -540,6 +562,56 @@ class LiveBroker(Broker):
             # über _reconcile_pending, nicht als sofortige Buchung.
         return fills
 
+    def _quantize_fok_groups(self, signals: list[Signal]) -> list[Signal]:
+        """Arb-Gruppen auf eine gemeinsame, börsenkonforme Size quantisieren.
+
+        Jedes FOK-Bein muss die Market-Order-Präzision einhalten (BUY:
+        Size*Preis max. 2 Nachkommastellen, SELL: max. 4) UND alle Beine
+        einer Gruppe müssen dieselbe Stückzahl behalten. Gruppen ohne
+        gültige gemeinsame Size werden verworfen (einmal geloggt) statt
+        vom Server abgelehnt zu werden.
+        """
+        import dataclasses
+
+        groups: dict[str, list[Signal]] = {}
+        for s in signals:
+            if s.group:
+                groups.setdefault(s.group, []).append(s)
+        if not groups:
+            return signals
+        drop: set[str] = set()
+        common: dict[str, float] = {}
+        for g, legs in groups.items():
+            try:
+                prices = [
+                    int(round(_quantize_price(
+                        s.price, float(self.client.get_tick_size(s.token_id)),
+                        s.side) * 1_000_000))
+                    for s in legs
+                ]
+            except Exception as e:  # noqa: BLE001 — dann prüft es der Server
+                log.warning("Gruppe %s: Tick-Abfrage für Size-Quantisierung "
+                            "fehlgeschlagen: %s", g, e)
+                continue
+            mods = [1_000_000 if s.side == "BUY" else 10_000 for s in legs]
+            k = min(int(math.floor(s.size * 100 + 1e-9)) for s in legs)
+            while k > 0 and any((k * p) % m for p, m in zip(prices, mods)):
+                k -= 1
+            if k <= 0:
+                drop.add(g)
+                log.info("Gruppe %s: keine börsenkonforme gemeinsame Size — "
+                         "Gelegenheit übersprungen", g)
+                continue
+            common[g] = k / 100
+        out: list[Signal] = []
+        for s in signals:
+            if s.group in drop:
+                continue
+            if s.group in common and abs(s.size - common[s.group]) > 1e-9:
+                s = dataclasses.replace(s, size=common[s.group])
+            out.append(s)
+        return out
+
     def _submit_signal(self, s: Signal, otype, portfolio: Portfolio,
                        fee_rates: dict[str, float],
                        tick_size: str | None = None) -> tuple[str, Fill | None]:
@@ -549,17 +621,27 @@ class LiveBroker(Broker):
                   ("pending", None) für ruhende GTC-Orders,
                   ("failed", None) bei Ablehnung/Fehler.
         """
-        from py_clob_client_v2.clob_types import OrderArgs, PartialCreateOrderOptions
+        from py_clob_client_v2.clob_types import OrderArgs, OrderType, PartialCreateOrderOptions
         from py_clob_client_v2.order_builder.constants import BUY, SELL
 
         try:
             tick = float(tick_size) if tick_size else float(self.client.get_tick_size(s.token_id))
             price = _quantize_price(s.price, tick, s.side)
+            size = round(s.size, 2)
+            if otype != OrderType.GTC:
+                # FOK/FAK prüft der Server als Market-Order: Beträge müssen
+                # exakt aufs Präzisionsraster passen, sonst 400 "invalid amounts".
+                size = _marketable_size(size, price, s.side)
+                if size <= 0:
+                    log.warning("Order verworfen (%s): keine börsenkonforme "
+                                "Size für %s @%.6f", s.market_question[:40],
+                                s.side, price)
+                    return "failed", None
             order = self.client.create_order(
                 OrderArgs(
                     token_id=s.token_id,
                     price=price,
-                    size=round(s.size, 2),
+                    size=size,
                     side=BUY if s.side == "BUY" else SELL,
                 ),
                 # Kein explizites tick_size (create_order löst den Tick selbst
