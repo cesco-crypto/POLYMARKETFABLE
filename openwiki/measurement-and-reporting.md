@@ -14,11 +14,12 @@ braucht die Gegenfrage «Wie könnte diese Zahl lügen?» (/CLAUDE.md).
   (`data/pnl_ledger.jsonl`); der Messbot startet alle 90min frisch,
   Fenster-Metriken brauchen deshalb Disk-State.
   Auswertung: `python -m polybot.main cycle-report`.
-- `shadow.py` — ShadowTracker (nur Live-Modus): simuliert dieselben
-  freigegebenen Signale im Paper-Pfad und misst pro Signal die
-  **Capture-Quote** = Live-Fill / Paper-Fill — DIE eine Zahl, die Paper
-  von Real trennt. Auswertung: `capture-report` (inkl. ehrlicher
-  Hochrechnung Paper-Rate × Capture).
+- `shadow.py` — ShadowTracker (nur Live-Modus): misst die
+  **Capture-Quote** = Live-Fill / Paper-Fill pro GELEGENHEITS-EPISODE
+  (nicht pro Tick — das war ~60x aufgeblasen): Episode = Gruppen-ID,
+  endet nach 30s Stille bzw. 600s hart; paper_fill = grösste
+  Einzel-Tick-Füllung, live_fill = Episodensumme; flush() bei
+  Prozessende. Auswertung: `capture-report`.
 - `report` (`cmd_report`): Hochrechnung auf USDC/Tag + Kapitalfrage.
 
 ## Bekannte Lügen der Zahlen (Checkliste vor jedem Bericht)

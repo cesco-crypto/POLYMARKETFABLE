@@ -63,6 +63,31 @@ nicht unser Geschäft). Aktivierung: `risk.flatten_orphan_grace_s > 0`.
 - Ausgenommen: vollständige Paare, NegRisk-Tokens (Phase 2), Tokens mit
   eigenen ruhenden Orders (MM-Inventar).
 
+## `settlement.py` — Resolution-Sweeper (Kapital-Deadlock-Fix)
+
+Bucht Positionen FINAL aufgelöster Märkte aus (closed + UMA resolved +
+outcomePrices exakt 0/1 -> `Market.resolved_payouts`): Gewinner 1
+USDC/Share, Verlierer 0. Gedrosselt (60s), Gamma-Token-Lookup übers
+ganze Inventar, crasht nie den Tick. Ohne ihn wächst total_exposure()
+monoton und der Risk-Manager blockt dauerhaft. Live-Grenze: Cash-
+Gutschrift setzt Polymarket-Auto-Redeem voraus (Batch-Redeem = Ausbau).
+
+## Paper-Fill-Ehrlichkeit: persistenter Liquiditätsverbrauch
+
+`PaperBroker._consumed_levels` merkt je (Token, Seite, Preislevel), was
+die Simulation konsumiert hat — dasselbe stehende Level füllt NICHT in
+jedem Tick erneut (das war die 2-10x-PnL-Inflation). Verbrauch verfällt
+erst, wenn das Level aus dem Buch verschwindet; Aufstocken gibt nur den
+Zuwachs frei; FOK-Rollback gibt tentativen Verbrauch zurück; gilt auch
+für Maker-Fills ruhender Quoten.
+
+## Not-Aus: cancel_all
+
+`LiveBroker.cancel_all_orders` läuft beim Prozessstart (Alt-Orders eines
+abgestürzten Vorgängers) und in `cmd_run finally` (Kill-Switch/Ctrl-C/
+Crash). Kein Zustand «Bot tot, Orders leben». Wirft nie; Fehlschlag wird
+laut geloggt (dann von Hand auf polymarket.com prüfen).
+
 ## Tests
 
 `tests/` (~400 Tests, pytest, keine Netzwerk-Calls — Fakes für Gamma/

@@ -36,9 +36,11 @@ Alles läuft in **einem Prozess** (`polybot/main.py`), zwei Threads:
    die Capture-Quote.
 5. Merges: Paper `merge_positions`, live `live_merge_positions` (nur
    on-chain Bestätigtes wird gebucht; live aktuell per Config AUS).
-6. `flattener.signals` + execute — Waisen-Glattstellung (umgeht
+6. `sweeper.sweep` — Resolution-Sweeper: aufgelöste Positionen zur
+   Auszahlung ausbuchen (Kapital-Recycling, Deadlock-Fix).
+7. `flattener.signals` + execute — Waisen-Glattstellung (umgeht
    `risk.filter` bewusst: SELLs reduzieren nur Risiko).
-7. `risk.check_daily_loss` erneut, `ledger.record_tick`.
+8. `risk.check_daily_loss` erneut, `ledger.record_tick`.
 
 ## Snapshot-Aufbau (`build_snapshot`)
 

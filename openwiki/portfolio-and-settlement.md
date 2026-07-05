@@ -32,6 +32,12 @@ Direkte web3-Contract-Calls (der py-clob-client-v2 hat keine Helfer):
   Receipt bestätigt ist.
 - V2-Adressen (Polygon, seit 28.04.2026) stehen als Konstanten im Modul.
 
+## `settlement.py` — Resolution-Sweeper
+
+Siehe [risk-and-execution](risk-and-execution.md): bucht final
+aufgelöste Positionen aus (`Portfolio.settle_position`); Ledger-Eintrag
+`kind=settlement`; aktiv in paper UND live.
+
 ## Deposit-Wallet-Flow & Preflight
 
 - `deposit_wallet.py`: Polymarket-V2-Konten halten pUSD/Tokens im

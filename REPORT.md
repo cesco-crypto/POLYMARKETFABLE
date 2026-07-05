@@ -205,3 +205,31 @@ erreichbar, wenn Capture UND Abdeckung nahe ans Maximum kommen —
 realistischer ist: Deadlock lösen → Capture sauber messen → skalieren,
 und parallel den nächsten Ertragsweg vorbereiten (Maker-Bein NUR mit
 gemessener Fill-Quote; In-play NUR mit Sportdaten-Feed = Weg B).
+
+---
+
+## Produktionsreife-Fixes (05.07.2026 abends): die 4 Blocker sind behoben
+
+Auftrag des Betreibers: kein System mit blockiertem Kapital, falschen
+Messungen, geschönter Simulation oder überlebenden Orders. Umsetzung
+(je mit Tests, Suite 426 grün; adversariale Verifikation läuft):
+
+1. **Resolution-Sweeper** (`polybot/settlement.py`): Positionen final
+   aufgelöster Märkte (closed + UMA resolved + outcomePrices 0/1) werden
+   gedrosselt per Gamma-Lookup erkannt und ausgebucht — Gewinner 1
+   USDC/Share, Verlierer 0 (realisierter Verlust). Damit atmet das
+   Exposure wieder; der Deadlock nach ~7-8 Paaren ist weg. Ehrliche
+   Grenze: Live-Cash setzt Polymarket-Auto-Redeem voraus (per
+   REDEEM-Event verifiziert); aktiver Batch-Redeem ist Folgeausbau.
+2. **Capture-Messung** (`polybot/shadow.py`): Episoden-Dedup — eine
+   Gelegenheit = ein Datensatz (Ende nach 30s Stille bzw. 600s hart),
+   paper_fill = grösste Einzel-Tick-Füllung, live_fill = Episodensumme
+   inkl. verspätet reconcilter Delayed-Fills; flush() bei Prozessende.
+3. **Paper-Simulation** (`polybot/execution.py`): Fills verbrauchen
+   Buchliquidität persistent über Ticks (levelgenau; Verfall nur, wenn
+   sich das Buch real bewegt; FOK-Rollback; gilt auch für Maker-Fills).
+   Konsequenz: ALLE bisherigen Paper-Tagesraten sind als 2-10x
+   inflationiert zu lesen; die Messreihe beginnt heute Abend neu.
+4. **Order-Sicherheit** (`polybot/execution.py`): `cancel_all` beim
+   Prozessstart (Alt-Orders eines Vorgängers) und in `cmd_run finally`
+   (Kill-Switch, Ctrl-C, Crash) — kein Zustand «Bot tot, Orders leben».
