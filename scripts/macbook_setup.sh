@@ -42,7 +42,7 @@ fi
 
 # 4) Schlüssel verifizieren (muss auf 0x5cbE…d159 ableiten)
 ./.venv/bin/python - <<'EOF'
-from dotenv import load_dotenv; load_dotenv()
+from dotenv import load_dotenv; load_dotenv('.env')
 import os, sys
 from eth_account import Account
 a = Account.from_key(os.environ["POLY_PRIVATE_KEY"]).address
