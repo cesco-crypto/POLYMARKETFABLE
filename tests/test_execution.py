@@ -1067,3 +1067,78 @@ def test_delayed_order_ungefuellt_setzt_cooldown():
     assert fills == 0
     assert pf.positions == {}
     assert broker._token_blocked("tok")  # kein sofortiges Neu-Feuern
+
+
+# ---- Persistenter Liquiditätsverbrauch (Befund Agenten-Flotte 05.07.2026) ----
+
+
+def test_paperbroker_gleiches_level_fuellt_nicht_doppelt_ueber_ticks():
+    """DER Inflations-Fix: dasselbe stehende Ask-Level über viele Ticks
+    darf nur EINMAL gekauft werden (Beleg: 74 identische Merges à +54.72)."""
+    broker = PaperBroker()
+    pf = Portfolio(cash=1_000.0)
+    book = OrderBook(token_id="tok", bids=[], asks=[Level(0.50, 10)])
+    sig = Signal(token_id="tok", side="BUY", price=0.50, size=10, reason="test")
+    assert broker.execute([sig], {"tok": book}, pf) == 1
+    for _ in range(5):  # 0.5s-Ticks mit unverändertem Buch
+        assert broker.execute([sig], {"tok": book}, pf) == 0
+    assert pf.positions["tok"].shares == pytest.approx(10)  # nicht 60
+
+
+def test_paperbroker_neues_level_ist_neue_liquiditaet():
+    broker = PaperBroker()
+    pf = Portfolio(cash=1_000.0)
+    sig = Signal(token_id="tok", side="BUY", price=0.51, size=10, reason="test")
+    book1 = OrderBook(token_id="tok", bids=[], asks=[Level(0.50, 10)])
+    assert broker.execute([sig], {"tok": book1}, pf) == 1
+    # Level 0.50 verschwindet (Markt bewegt sich), neues Level 0.51 erscheint.
+    book2 = OrderBook(token_id="tok", bids=[], asks=[Level(0.51, 10)])
+    assert broker.execute([sig], {"tok": book2}, pf) == 1
+    # Und wenn 0.50 später WIEDER auftaucht, ist das neue Liquidität.
+    assert broker.execute([sig], {"tok": book1}, pf) == 1
+    assert pf.positions["tok"].shares == pytest.approx(30)
+
+
+def test_paperbroker_aufgestocktes_level_gibt_nur_den_zuwachs():
+    broker = PaperBroker()
+    pf = Portfolio(cash=1_000.0)
+    sig = Signal(token_id="tok", side="BUY", price=0.50, size=100, reason="test")
+    assert broker.execute(
+        [sig], {"tok": OrderBook("tok", asks=[Level(0.50, 10)])}, pf) == 1
+    # Jemand legt nach: Level zeigt jetzt 25 — wir haben 10 konsumiert,
+    # verfügbar sind nur die 15 Zuwachs.
+    assert broker.execute(
+        [sig], {"tok": OrderBook("tok", asks=[Level(0.50, 25)])}, pf) == 1
+    assert pf.positions["tok"].shares == pytest.approx(25)
+
+
+def test_paperbroker_fok_rollback_gibt_levelverbrauch_frei():
+    broker = PaperBroker()
+    pf = Portfolio(cash=1_000.0)
+    books = {
+        "a": OrderBook("a", asks=[Level(0.50, 10)]),
+        "b": OrderBook("b", asks=[Level(0.40, 2)]),   # Bein B nicht voll füllbar
+    }
+    grp = [Signal(token_id="a", side="BUY", price=0.50, size=10, reason="t", group="g"),
+           Signal(token_id="b", side="BUY", price=0.40, size=10, reason="t", group="g")]
+    assert broker.execute(grp, books, pf) == 0        # FOK: Gruppe verworfen
+    # Der tentative Verbrauch auf Token a wurde zurückgegeben: ein
+    # ungruppiertes Signal kann die vollen 10 Shares kaufen.
+    solo = Signal(token_id="a", side="BUY", price=0.50, size=10, reason="t")
+    assert broker.execute([solo], books, pf) == 1
+    assert pf.positions["a"].shares == pytest.approx(10)
+
+
+def test_paperbroker_maker_fill_verbraucht_gegenseite_nur_einmal():
+    """Ruhende Quote gegen eine STEHENDE Gegenseite: füllt nur einmal,
+    nicht bei jedem Tick erneut (dieselbe Inflation wie bei Taker-Fills)."""
+    broker = PaperBroker()
+    pf = Portfolio(cash=1_000.0)
+    pf.resting_orders.append(RestingOrder(ts=0.0, token_id="tok", side="BUY",
+                                          price=0.50, size=30, reason="MM Bid"))
+    book = OrderBook(token_id="tok", bids=[], asks=[Level(0.49, 10)])
+    assert broker.execute([], {"tok": book}, pf) == 1
+    assert pf.positions["tok"].shares == pytest.approx(10)
+    # Unverändertes Buch: die Rest-Quote (20) darf NICHT erneut füllen.
+    assert broker.execute([], {"tok": book}, pf) == 0
+    assert pf.positions["tok"].shares == pytest.approx(10)

@@ -138,6 +138,17 @@ class PaperBroker(Broker):
         # Signale ersatzlos (live wären diese Orders auch nie rausgegangen,
         # und ihr Ursprungs-Snapshot ist nach dem Neustart ohnehin stale).
         self._pending_signals: list[list] = []
+        # Persistenter Liquiditätsverbrauch ÜBER Ticks (Befund Agenten-Flotte
+        # 05.07.2026): Paper-Fills dezimieren das reale Buch nicht — dasselbe
+        # ruhende Ask-Level wurde im Sekundentakt erneut »gekauft« (Beleg:
+        # 74 identische Merges à +54.72 USDC aus einem einzigen 364-Share-Ask;
+        # Up/Down-PnL ~10x inflationiert). Deshalb merken wir uns je
+        # (Token, Seite) pro Preislevel, wie viel WIR simuliert konsumiert
+        # haben: verfügbar ist nur noch max(0, Levelgröße - verbraucht).
+        # Ein Eintrag verfällt, wenn das Level aus dem Buch verschwindet
+        # (der Markt hat sich real bewegt; taucht der Preis später wieder
+        # auf, ist das neue Liquidität).
+        self._consumed_levels: dict[tuple[str, str], dict[float, float]] = {}
 
     def _rebate_rate(self, token_id: str, fee_rates: dict[str, float]) -> float:
         """Maker-Rebate-Rate eines Tokens: 20% seiner Taker-Fee-Rate.
@@ -151,14 +162,20 @@ class PaperBroker(Broker):
             return self.maker_rebate_rate
         return MAKER_REBATE_SHARE * rate
 
-    def _walk_levels(self, s: Signal, levels, max_size: float, skip: float,
-                     cash_left: float, rate: float) -> tuple[float, float, float]:
-        """Marketable Levels abfüllen: (filled, cost, fee) zum Level-Preis.
+    def _walk_levels(self, s: Signal, levels, max_size: float,
+                     cash_left: float, rate: float,
+                     ) -> tuple[float, float, float, list[tuple[float, float]]]:
+        """Marketable Levels abfüllen: (filled, cost, fee, takes) zum Level-Preis.
 
-        skip = im selben Tick bereits konsumierte Buchliquidität dieser Seite;
         cash_left deckelt BUYs (inkl. Gebühr) — Polymarket kennt keine Margin.
+        Verfügbar pro Level ist nur, was WIR nicht schon konsumiert haben
+        (self._consumed_levels — persistent über Ticks UND innerhalb eines
+        Aufrufs, weil jeder Fill sofort committet); takes listet
+        (Levelpreis, Shares) für Commit/Rollback des Verbrauchs.
         """
+        used_levels = self._consumed_levels.get((s.token_id, s.side), {})
         filled = cost = fee = 0.0
+        takes: list[tuple[float, float]] = []
         remaining = max_size
         for lv in levels:
             if remaining <= 1e-9:
@@ -167,11 +184,7 @@ class PaperBroker(Broker):
             if (s.side == "BUY" and lv.price > s.price) or \
                (s.side == "SELL" and lv.price < s.price):
                 break
-            avail = lv.size
-            if skip > 0:
-                used = min(skip, avail)
-                avail -= used
-                skip -= used
+            avail = max(0.0, lv.size - used_levels.get(lv.price, 0.0))
             take = min(remaining, avail)
             fee_ps = rate * lv.price * (1.0 - lv.price)
             if s.side == "BUY":
@@ -185,13 +198,49 @@ class PaperBroker(Broker):
             filled += take
             cost += take * lv.price
             fee += take * fee_ps
+            takes.append((lv.price, take))
             remaining -= take
-        return filled, cost, fee
+        return filled, cost, fee, takes
+
+    # ---- Persistenter Liquiditätsverbrauch (über Ticks) ---------------------
+
+    def _commit_consumption(self, token_id: str, side: str,
+                            takes: list[tuple[float, float]]) -> None:
+        if not takes:
+            return
+        d = self._consumed_levels.setdefault((token_id, side), {})
+        for price, shares in takes:
+            d[price] = d.get(price, 0.0) + shares
+
+    def _revert_consumption(self, token_id: str, side: str,
+                            takes: list[tuple[float, float]]) -> None:
+        d = self._consumed_levels.get((token_id, side))
+        if not d:
+            return
+        for price, shares in takes:
+            d[price] = max(0.0, d.get(price, 0.0) - shares)
+
+    def _gc_consumption(self, books: dict[str, OrderBook]) -> None:
+        """Verbrauch von Levels vergessen, die im aktuellen Buch fehlen.
+
+        Level weg = der Markt hat sich real bewegt; taucht derselbe Preis
+        später wieder auf, ist das neue Liquidität. Tokens ohne Buch in
+        diesem Aufruf bleiben unangetastet (Buch nur gerade nicht geladen).
+        """
+        for (token, side), levels in list(self._consumed_levels.items()):
+            book = books.get(token)
+            if book is None:
+                continue
+            current = {lv.price for lv in
+                       (book.asks if side == "BUY" else book.bids)}
+            for price in [p for p in levels if p not in current]:
+                del levels[price]
+            if not levels:
+                del self._consumed_levels[(token, side)]
 
     # ---- Ruhende Orders (Maker-Simulation) ---------------------------------
 
     def _match_resting(self, books: dict[str, OrderBook], portfolio: Portfolio,
-                       consumed: dict[tuple[str, str], float],
                        fee_rates: dict[str, float]) -> int:
         """Ruhende Orders gegen den aktuellen Book-Snapshot prüfen und füllen.
 
@@ -209,17 +258,33 @@ class PaperBroker(Broker):
             if not book:
                 still_resting.append(o)
                 continue
+            # Gegenliquidität bis zum Orderpreis, abzüglich dessen, was WIR
+            # auf diesen Levels schon in früheren Ticks konsumiert haben —
+            # sonst füllt dieselbe stehende Gegenseite die Quote jeden Tick
+            # aufs Neue (dieselbe Inflation wie bei Taker-Fills).
+            used_levels = self._consumed_levels.get((o.token_id, o.side), {})
             if o.side == "BUY":
-                avail = sum(lv.size for lv in book.asks if lv.price <= o.price + 1e-9)
+                crossing = [lv for lv in book.asks if lv.price <= o.price + 1e-9]
             else:
-                avail = sum(lv.size for lv in book.bids if lv.price >= o.price - 1e-9)
-            take = min(o.size, avail)
+                crossing = [lv for lv in book.bids if lv.price >= o.price - 1e-9]
+            take_cap = o.size
             if o.side == "SELL":
                 pos = portfolio.positions.get(o.token_id)
-                take = min(take, pos.shares if pos else 0.0)
+                take_cap = min(take_cap, pos.shares if pos else 0.0)
+            take = 0.0
+            takes: list[tuple[float, float]] = []
+            for lv in crossing:
+                if take >= take_cap - 1e-9:
+                    break
+                avail = max(0.0, lv.size - used_levels.get(lv.price, 0.0))
+                lv_take = min(take_cap - take, avail)
+                if lv_take > 1e-12:
+                    take += lv_take
+                    takes.append((lv.price, lv_take))
             if take <= 1e-9:
                 still_resting.append(o)
                 continue
+            self._commit_consumption(o.token_id, o.side, takes)
             fill = Fill(ts=time.time(), token_id=o.token_id, side=o.side,
                         price=o.price, size=take, reason=o.reason, fee=0.0)
             portfolio.apply_fill(fill)
@@ -227,7 +292,6 @@ class PaperBroker(Broker):
             # des Marktes — tokenspezifisch, siehe _rebate_rate.
             portfolio.credit_rebate(take * self._rebate_rate(o.token_id, fee_rates)
                                     * o.price * (1.0 - o.price))
-            consumed[(o.token_id, o.side)] = consumed.get((o.token_id, o.side), 0.0) + take
             fills += 1
             log.info("Paper-Maker-Fill: %s %.0f Shares @%.3f (Gebühr 0) — %s (%s)",
                      o.side, take, o.price, o.market_question[:50], o.reason)
@@ -305,12 +369,12 @@ class PaperBroker(Broker):
                             fee_rates: dict[str, float] | None = None) -> int:
         """Signale gegen die übergebenen Bücher füllen (Kernlogik ohne Verzug)."""
         fee_rates = fee_rates or {}
-        # Innerhalb dieses Aufrufs bereits konsumierte Buchliquidität je
-        # (Token, Seite): spätere Signale sehen nur noch die Restliquidität.
-        consumed: dict[tuple[str, str], float] = {}
+        # Verfallenen Level-Verbrauch aufräumen (Buch hat sich real bewegt).
+        self._gc_consumption(books)
         # Zuerst ruhende Orders gegen das aktuelle Buch prüfen (Maker-Fills);
-        # die dabei konsumierte Liquidität sehen neue Signale nicht mehr.
-        fills = self._match_resting(books, portfolio, consumed, fee_rates)
+        # die dabei konsumierte Liquidität sehen neue Signale nicht mehr
+        # (jeder Fill committet sofort in self._consumed_levels).
+        fills = self._match_resting(books, portfolio, fee_rates)
         # Laufendes Cash über alle geplanten Fills dieses Aufrufs. Konservativ:
         # Erlöse noch nicht gebuchter Gruppen-SELLs zählen nicht als verfügbar;
         # das von ruhenden BUYs reservierte Cash ist nicht verfügbar.
@@ -318,17 +382,18 @@ class PaperBroker(Broker):
         # Von noch nicht gebuchten Gruppen-SELLs reservierte Shares je Token.
         reserved: dict[str, float] = {}
         # Geplante Beine je Gruppe (gebucht erst, wenn alle Beine voll füllbar
-        # waren) plus Rollback-Infos: (token, side, filled, cash_used, reserviert).
+        # waren) plus Rollback-Infos:
+        # (token, side, filled, cash_used, reserviert, level_takes).
         group_plans: dict[str, list[Fill]] = {}
-        group_state: dict[str, list[tuple[str, str, float, float, float]]] = {}
+        group_state: dict[str, list[tuple[str, str, float, float, float, list]]] = {}
         failed_groups: set[str] = set()
 
         def fail_group(group: str) -> float:
             """Gruppe verwerfen: tentativ belegte Liquidität/Cash/Shares freigeben."""
             failed_groups.add(group)
             freed_cash = 0.0
-            for tok, side, f_filled, cash_used, res in group_state.pop(group, []):
-                consumed[(tok, side)] -= f_filled
+            for tok, side, f_filled, cash_used, res, takes in group_state.pop(group, []):
+                self._revert_consumption(tok, side, takes)
                 freed_cash += cash_used
                 if res > 0:
                     reserved[tok] -= res
@@ -365,15 +430,17 @@ class PaperBroker(Broker):
                 pos = portfolio.positions.get(s.token_id)
                 held = (pos.shares if pos else 0.0) - reserved.get(s.token_id, 0.0)
                 max_size = min(s.size, max(held, 0.0))
-            skip = consumed.get((s.token_id, s.side), 0.0)
-            filled, cost, fee = self._walk_levels(s, levels, max_size, skip,
-                                                  cash_left, rate)
+            filled, cost, fee, takes = self._walk_levels(s, levels, max_size,
+                                                         cash_left, rate)
             if s.group and filled < s.size - 1e-9:
                 # FOK: Bein nicht in voller Größe füllbar -> ganze Gruppe weg.
                 cash_left += fail_group(s.group)
                 continue
             if filled > 1e-9:
-                consumed[(s.token_id, s.side)] = skip + filled
+                # Verbrauch sofort festhalten (sichtbar für spätere Signale
+                # DIESES Aufrufs und alle künftigen Ticks); bei FOK-Rollback
+                # gibt fail_group ihn wieder frei.
+                self._commit_consumption(s.token_id, s.side, takes)
                 cash_used = cost + fee if s.side == "BUY" else 0.0
                 cash_left -= cash_used
                 if s.side == "SELL" and not s.group:
@@ -387,7 +454,7 @@ class PaperBroker(Broker):
                         reserved[s.token_id] = reserved.get(s.token_id, 0.0) + res
                     group_plans.setdefault(s.group, []).append(fill)
                     group_state.setdefault(s.group, []).append(
-                        (s.token_id, s.side, filled, cash_used, res))
+                        (s.token_id, s.side, filled, cash_used, res, takes))
                 else:
                     portfolio.apply_fill(fill)
                     fills += 1
