@@ -829,7 +829,9 @@ def cmd_run(cfg: BotConfig) -> None:
         # oder Crash ALLE offenen Börsen-Orders canceln (Live-Broker).
         cancel_all = getattr(broker, "cancel_all_orders", None)
         if cancel_all is not None:
-            cancel_all("Prozessende")
+            # Mit Portfolio: letzter Reconcile-Pass vor UND nach dem Cancel,
+            # damit Fills der letzten Sekunden nicht verloren gehen.
+            cancel_all("Prozessende", portfolio)
         portfolio.save(state_path)
         if shadow is not None:
             # Offene Mess-Episoden schliessen — sonst fehlt der letzte

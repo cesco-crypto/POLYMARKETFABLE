@@ -204,6 +204,10 @@ class PaperBroker(Broker):
 
     # ---- Persistenter Liquiditätsverbrauch (über Ticks) ---------------------
 
+    # Obergrenze für getrackte (Token, Seite)-Einträge — ältestes fliegt
+    # zuerst (Befund 12: Tokens ohne je wieder ein Buch wüchsen unbegrenzt).
+    MAX_CONSUMED_ENTRIES = 5000
+
     def _commit_consumption(self, token_id: str, side: str,
                             takes: list[tuple[float, float]]) -> None:
         if not takes:
@@ -211,6 +215,8 @@ class PaperBroker(Broker):
         d = self._consumed_levels.setdefault((token_id, side), {})
         for price, shares in takes:
             d[price] = d.get(price, 0.0) + shares
+        while len(self._consumed_levels) > self.MAX_CONSUMED_ENTRIES:
+            self._consumed_levels.pop(next(iter(self._consumed_levels)))
 
     def _revert_consumption(self, token_id: str, side: str,
                             takes: list[tuple[float, float]]) -> None:
@@ -231,8 +237,13 @@ class PaperBroker(Broker):
             book = books.get(token)
             if book is None:
                 continue
-            current = {lv.price for lv in
-                       (book.asks if side == "BUY" else book.bids)}
+            side_levels = book.asks if side == "BUY" else book.bids
+            if not side_levels or all(lv.size <= 0 for lv in side_levels):
+                # Synthetisches Top-of-Book (Grösse 0) bzw. Flicker-Leere:
+                # kein echtes Markt-Update — Verbrauch NICHT vergessen,
+                # sonst kehrt die Fill-Inflation zurück (Befund 9).
+                continue
+            current = {lv.price for lv in side_levels}
             for price in [p for p in levels if p not in current]:
                 del levels[price]
             if not levels:
@@ -573,22 +584,43 @@ class LiveBroker(Broker):
         # Der neue Prozess kennt die Alt-Orders nicht (kein persistiertes
         # Order-Tracking), Cancel ist die einzige sichere Option; gefüllte
         # Mengen holt der Settlement-/Waisen-Pfad über die Positionen ein.
-        self.cancel_all_orders("Prozessstart")
+        # Scheitert das Cancel (CLOB-Glitch), startet der Bot trotzdem —
+        # aber der Versuch wird pro Tick wiederholt, bis er gelingt
+        # (Befund 15: sonst quotet er auf lebende Geister-Orders drauf).
+        self._start_cancel_pending = not self.cancel_all_orders("Prozessstart")
 
     # ---- Not-Aus: alle offenen Börsen-Orders canceln -------------------------
 
-    def cancel_all_orders(self, why: str) -> bool:
+    def cancel_all_orders(self, why: str, portfolio: Portfolio | None = None,
+                          fee_rates: dict[str, float] | None = None) -> bool:
         """ALLE offenen Orders dieses Kontos auf dem CLOB canceln.
 
         Der gefährlichste Zustand ist »Bot tot, Orders leben«: ruhende
         GTC-Orders (MM-Quotes, Waisen-SELLs) füllen nach Kill-Switch/Crash
         unbeaufsichtigt weiter, ohne dass irgendjemand sie bucht. Wird beim
         Prozessstart und beim Prozessende (cmd_run finally) gerufen.
+
+        Mit portfolio läuft VOR dem Cancel ein letzter Reconcile-Pass und
+        NACH dem Cancel noch einer (Verifikations-Befund 13/25/31: Fills
+        der letzten Sekunden bzw. aus dem Cancel-Race gingen sonst
+        endgültig verloren — _pending wurde kommentarlos geleert).
         Wirft nie — ein fehlgeschlagenes Cancel wird laut geloggt, damit
         der Betreiber von Hand eingreifen kann.
         """
+        def reconcile_quiet():
+            if portfolio is None or not self._pending:
+                return
+            try:
+                self._reconcile_pending(portfolio, fee_rates or {})
+            except Exception as e:  # noqa: BLE001
+                log.warning("Reconcile vor/nach cancel_all fehlgeschlagen: %s", e)
+
+        reconcile_quiet()
         try:
             self.client.cancel_all()
+            # Race-Fenster schliessen: was zwischen letztem Reconcile und
+            # Cancel-Wirkung noch matchte, jetzt nachbuchen.
+            reconcile_quiet()
             self._pending.clear()
             self._open_orders.clear()
             log.info("Alle offenen Börsen-Orders gecancelt (%s)", why)
@@ -605,6 +637,11 @@ class LiveBroker(Broker):
         from py_clob_client_v2.clob_types import OrderType
 
         fee_rates = fee_rates or {}
+        if getattr(self, "_start_cancel_pending", False):
+            # Start-Hygiene nachholen (Befund 15): Geister-Orders des
+            # Vorgängers so lange erneut canceln, bis es gelingt.
+            self._start_cancel_pending = not self.cancel_all_orders(
+                "Prozessstart-Retry", portfolio, fee_rates)
         # Zuerst reale (Teil-)Fills ruhender Orders nachbuchen — Portfolio und
         # Risiko-Limits dürfen weder Phantom- noch fehlende Positionen sehen.
         fills = self._reconcile_pending(portfolio, fee_rates)
@@ -860,13 +897,29 @@ class LiveBroker(Broker):
             if status in ("canceled", "cancelled", "unmatched"):
                 return self._book_delayed_leftover(s, o, order_id, price,
                                                    portfolio, fee_rates)
+        cancel_ok = True
         try:
             self.client.cancel_order(OrderPayload(orderID=order_id))
         except Exception as e:  # noqa: BLE001
+            cancel_ok = False
             log.warning("Cancel der delayed Order %s fehlgeschlagen: %s", order_id, e)
         o = self._get_order_safe(order_id)
         if o and o.get("status") == "matched":
             return "matched", self._book_order_state(s, o, price, portfolio, fee_rates)
+        if not cancel_ok and (o is None or o.get("status") in ("live", "delayed")):
+            # Befund 28: Cancel fehlgeschlagen und Order lebt (womöglich)
+            # weiter — Tracking behalten, damit _reconcile_pending spätere
+            # Fills nachbucht (der Waisen-Detektor stellt sie dann glatt).
+            # Für die Gruppen-Logik zählt das Bein als Fehlschlag (Unwind).
+            matched_so_far = _to_float(((o or {}).get("size_matched")
+                                        or (o or {}).get("sizeMatched")))
+            self._pending[order_id] = _PendingOrder(
+                order_id=order_id, token_id=s.token_id, side=s.side,
+                price=price, reason=s.reason, taker=True,
+                booked_size=matched_so_far)
+            log.error("Delayed-Order %s lebt nach Cancel-Fehlschlag ggf. "
+                      "weiter — bleibt im Reconcile-Tracking", order_id)
+            return "failed", None
         return self._book_delayed_leftover(s, o, order_id, price, portfolio, fee_rates)
 
     def _book_delayed_leftover(self, s: Signal, o: dict | None, order_id: str,
@@ -936,12 +989,21 @@ class LiveBroker(Broker):
 
     @staticmethod
     def _apply_fill_safe(portfolio: Portfolio, fill: Fill) -> None:
-        """Fill buchen; Buchhaltungsfehler dürfen die reale Ausführung nicht kippen."""
+        """Fill buchen; Buchhaltungsfehler dürfen die reale Ausführung nicht kippen.
+
+        Ein von der BÖRSE bestätigter Fill ist Chain-Realität — schlägt die
+        normale Buchung fehl (Cash-/Bestands-Guard, weil die Buchhaltung
+        z.B. nach einem Sync von der Chain abwich), wird FORCIERT gebucht
+        statt verworfen (Befunde 21/29: der Fill ging sonst endgültig
+        verloren, das Bein war für Flattener/Settlement unsichtbar).
+        """
         try:
             portfolio.apply_fill(fill)
         except ValueError as e:
-            log.error("Fill nicht verbuchbar (Portfolio inkonsistent zur Börse?): %s — "
-                      "Bestände manuell abgleichen!", e)
+            log.error("Fill kollidiert mit der Buchhaltung (%s) — Chain-Fill "
+                      "wird FORCIERT gebucht, Positions-Sync gleicht später "
+                      "ab", e)
+            portfolio.apply_fill(fill, force=True)
 
     # ---- Reconciliation ruhender Orders -------------------------------------
 
@@ -1030,11 +1092,16 @@ class LiveBroker(Broker):
         """
         from py_clob_client_v2.clob_types import OrderPayload
 
+        survivors: list[str] = []
         for oid in self._open_orders.pop(token_id, []):
             try:
                 self.client.cancel_order(OrderPayload(orderID=oid))
             except Exception as e:  # noqa: BLE001
-                log.warning("Cancel für Order %s fehlgeschlagen: %s", oid, e)
+                survivors.append(oid)  # Befund 33: ID behalten -> Retry
+                log.warning("Cancel für Order %s fehlgeschlagen: %s — wird "
+                            "beim nächsten Requote erneut versucht", oid, e)
+        if survivors:
+            self._open_orders[token_id] = survivors
 
     def _fresh_tick(self, token_id: str) -> str | None:
         """Tick-Größe am Client-Cache vorbei frisch vom CLOB holen.

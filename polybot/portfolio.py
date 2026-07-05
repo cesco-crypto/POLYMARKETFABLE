@@ -119,8 +119,23 @@ class Portfolio:
         self.realized_pnl += amount
         self.rebates_earned += amount
 
-    def apply_fill(self, fill: Fill) -> None:
+    def apply_fill(self, fill: Fill, force: bool = False) -> None:
+        """Fill buchen. force=True nur für BÖRSEN-BESTÄTIGTE Live-Fills:
+        Chain-Realität schlägt Buchhaltungs-Guards — SELL wird am Bestand
+        gekappt (Überhang wurde extern erworben/verkauft, das klärt der
+        Positions-Sync), BUY darf das Cash ins Minus ziehen (lauter
+        Log-Hinweis; die Börse hätte ohne echte Deckung nie gematcht)."""
         pos = self.positions.setdefault(fill.token_id, Position(token_id=fill.token_id))
+        if force and fill.side != "BUY" and fill.size > pos.shares + 1e-9:
+            log.error("Forcierter SELL %.2f > Bestand %.2f (%s) — am Bestand "
+                      "gekappt, Positions-Sync gleicht ab", fill.size,
+                      pos.shares, fill.token_id[:16])
+            fill = Fill(ts=fill.ts, token_id=fill.token_id, side=fill.side,
+                        price=fill.price, size=pos.shares, reason=fill.reason,
+                        fee=fill.fee)
+            if fill.size <= 1e-9:
+                self.positions.pop(fill.token_id, None)
+                return
         if fill.side != "BUY" and fill.size > pos.shares + 1e-9:
             # Verkauf über den Bestand hinaus würde Phantom-Gewinn buchen
             # (avg_cost=0) und die negative Position still verwerfen.
@@ -132,7 +147,12 @@ class Portfolio:
             )
         if fill.side == "BUY":
             cost = fill.price * fill.size + fill.fee
-            if cost > self.cash + 1e-6:
+            if force and cost > self.cash + 1e-6:
+                log.error("Forcierter BUY zieht Cash ins Minus (%.2f -> %.2f) "
+                          "— Chain-Fill gebucht, Buchhaltung driftet, "
+                          "Positions-Sync/Balance-Check beachten",
+                          self.cash, self.cash - cost)
+            elif cost > self.cash + 1e-6:
                 # Polymarket kennt keine Margin — ein BUY ohne Deckung würde
                 # die Paper-Buchhaltung von der Realität entkoppeln.
                 if pos.shares <= 1e-9:

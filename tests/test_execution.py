@@ -1185,3 +1185,93 @@ def test_cancel_all_orders_wirft_nie(caplog):
     with caplog.at_level(logging.ERROR):
         assert broker.cancel_all_orders("Test") is False
     assert any("VON HAND" in r.message for r in caplog.records)
+
+
+# ---- Verifikations-Flotte Runde 2: Lifecycle-Befunde 9/13/15/21/28/33 --------
+
+
+def test_cancel_all_reconciled_vor_und_nach_dem_cancel():
+    """Befund 13/25/31: Fills der letzten Sekunden dürfen beim Prozessende
+    nicht verloren gehen — _pending wird erst nach finalem Reconcile geleert."""
+    from polybot.execution import _PendingOrder
+
+    client = FakeClobClient()
+    client.orders["oid1"] = {"status": "canceled", "size_matched": "7",
+                             "price": "0.5"}
+    broker = make_live_broker(client)
+    broker._pending["oid1"] = _PendingOrder(order_id="oid1", token_id="tok",
+                                            side="BUY", price=0.5, reason="r")
+    pf = Portfolio(cash=100.0)
+    assert broker.cancel_all_orders("Test", pf) is True
+    assert pf.positions["tok"].shares == pytest.approx(7)   # nachgebucht
+    assert broker._pending == {}
+
+
+def test_boersenfill_wird_forciert_gebucht_statt_verworfen():
+    """Befund 21/29: Chain-Fill kollidiert mit Buchhaltung (z.B. SELL nach
+    externem Verkauf) -> kappen/forcieren statt verlieren."""
+    from polybot.execution import LiveBroker
+    from polybot.portfolio import Fill
+
+    pf = Portfolio(cash=100.0)
+    pf.apply_fill(Fill(ts=0, token_id="tok", side="BUY", price=0.5, size=5,
+                       reason="r"))
+    # Börse bestätigt SELL 8 > Bestand 5: normal würde apply_fill werfen.
+    LiveBroker._apply_fill_safe(pf, Fill(ts=1, token_id="tok", side="SELL",
+                                         price=0.6, size=8, reason="r"))
+    assert "tok" not in pf.positions          # Bestand sauber ausgebucht
+    assert pf.cash == pytest.approx(100.0 - 2.5 + 5 * 0.6)
+
+
+def test_delayed_cancel_fehlschlag_haelt_tracking():
+    """Befund 28: Cancel scheitert, Order lebt evtl. weiter — sie bleibt im
+    Reconcile-Tracking statt vergessen zu werden."""
+    class NoCancelClient(FakeClobClient):
+        def cancel_order(self, payload):
+            raise RuntimeError("cancel down")
+
+    client = NoCancelClient(statuses={"tok": "delayed"})
+    broker = make_live_broker(client)
+    broker.DELAY_POLL_ATTEMPTS = 1
+    pf = Portfolio(cash=100.0)
+    sig = Signal(token_id="tok", side="BUY", price=0.5, size=10,
+                 reason="r", group="g")
+    broker.execute([sig], {}, pf)
+    assert len(broker._pending) == 1          # Order wird weiter beobachtet
+
+
+def test_gc_verschont_verbrauch_bei_synthetischem_buch():
+    """Befund 9: Grösse-0-Bücher (synthetisches Top-of-Book, Flicker) sind
+    kein Markt-Update — der Verbrauch bleibt, die Inflation kehrt nicht
+    zurück."""
+    broker = PaperBroker()
+    pf = Portfolio(cash=1_000.0)
+    real = OrderBook("tok", asks=[Level(0.5, 10)])
+    sig = Signal(token_id="tok", side="BUY", price=0.5, size=10, reason="t")
+    assert broker.execute([sig], {"tok": real}, pf) == 1
+    synth = OrderBook("tok", asks=[Level(0.5, 0.0)])   # synthetisch
+    broker.execute([], {"tok": synth}, pf)             # GC-Durchlauf
+    assert broker.execute([sig], {"tok": real}, pf) == 0  # Verbrauch lebt
+
+
+def test_init_cancel_fehlschlag_wird_pro_tick_nachgeholt():
+    """Befund 15: Bot startet trotz cancel_all-Fehlschlag, holt das Cancel
+    aber bei jedem execute() nach, bis es gelingt."""
+    class FlakyClient(FakeClobClient):
+        def __init__(self):
+            super().__init__()
+            self.attempts = 0
+
+        def cancel_all(self):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise RuntimeError("CLOB down")
+
+    client = FlakyClient()
+    broker = make_live_broker(client)
+    broker._start_cancel_pending = True       # wie nach gescheitertem Init
+    pf = Portfolio(cash=100.0)
+    broker.execute([], {}, pf)
+    assert client.attempts >= 1
+    broker.execute([], {}, pf)
+    assert broker._start_cancel_pending is False
