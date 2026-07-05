@@ -134,3 +134,74 @@ genauso −29. Deshalb neu (`polybot/orphan.py`):
   MM-Inventar (Kombination per Config-Check verboten), Staub < 1 USDC.
 - Aktiv in `config.live.yaml` (`flatten_orphan_grace_s: 60`); im
   Paper-Messbetrieb aus, damit die Messreihe vergleichbar bleibt.
+
+---
+
+## Strategie-Kritik der Agenten-Flotte (05.07.2026, 65 Agenten: 16 Kritiker + 49 Verifikatoren)
+
+Auftrag: grosses Hinterfragen von Strategie und Scan-Trichter, adversarial
+verifiziert (jede Idee gegen Code UND Messdaten geprüft). Verdikte:
+43× abschwächen, 2× verwerfen, 2× halten. Die wichtigsten Ergebnisse:
+
+### Bestätigt & kritisch (das sind die echten Blocker)
+
+1. **Kapital-Deadlock im Live-Bot (Prio 9, mehrfach verifiziert):** Es
+   existiert KEIN Code-Pfad, der Exposure oder Cash je freigibt —
+   live_auto_merge ist aus, Redeem/Settlement ist nicht gebaut.
+   portfolio.total_exposure() wächst monoton; nach ~7-8 gefüllten Paaren
+   (150er-Cap) bzw. ~30 Paaren (Cash 600) stoppt der Bot DAUERHAFT.
+   Chain-Beweis: das Wallet zeigt ein REDEEM-Event (+5 USDC, ~36 min nach
+   Auflösung) — die Chain zahlt aus, nur die Buchhaltung weiss es nicht.
+   → Arbeitspaket Nr. 1: Resolution-Sweeper (aufgelöste Paare als
+   1 USDC/Set ausbuchen; prüfen, ob Redeem automatisch kommt oder als
+   Deposit-Wallet-Batch gebaut werden muss). Ohne das ist jede andere
+   Optimierung wertlos.
+
+2. **Capture-Messung ist strukturell kaputt:** Der ShadowTracker loggt
+   dieselbe Gelegenheit jeden 0.5s-Tick neu (6 echte Gelegenheiten =
+   750 Records, ~60x aufgeblasen); die Capture-Quote wird dadurch gegen 0
+   gedrückt und die Paper-Referenz massiv überzeichnet.
+   → Arbeitspaket Nr. 2: Episoden-Dedup im Shadow (Gruppen-ID, Episode
+   endet nach N Sekunden Stille). Ohne das ist Stufe 3 des Plans
+   (Capture messen) nicht durchführbar.
+
+3. **Paper-PnL ist 2-10x inflationiert:** Die Fill-Simulation verbraucht
+   gestreamte Liquidität nicht — dasselbe ruhende Ask-Level wird im
+   Sekundentakt erneut »gekauft« (Beleg: 74 IDENTISCHE Merges à +54.72
+   im Ledger = 3'996 »Gewinn« aus real einmalig ~55). Dedupliziert
+   schrumpft der Tages-Theo-Pool nach Filtern auf ~1'000-1'300 USDC/Tag.
+   → Arbeitspaket Nr. 3: Paper-Fills müssen Stream-Liquidität dezimieren.
+
+4. **Sicherheitslücke Prozessende:** Bei Kill-Switch/Crash/Neustart wird
+   kein einziges Börsen-Order gecancelt — ruhende GTC-Orders (z.B. vom
+   Waisen-Detektor) füllen unbeaufsichtigt weiter. client.cancel_all()
+   existiert im SDK. → Arbeitspaket Nr. 4 (klein): cancel_all im
+   finally von cmd_run + beim Broker-Start.
+
+### Geprüft und verworfen (nicht bauen)
+
+- **WSS-Sharding auf mehr Tokens:** Das 500er-Abo deckt das profitable
+  ≤2h-Fenster bereits komplett ab (~300 Tokens); die »69/95 unsichtbaren
+  Episoden« waren REST-Snapshot-Artefakte.
+- **In-play-Reaktivierung (Esports):** Die »63% des Arb-Werts« sind
+  ~38x tick-inflationiert; persistente In-play-Edges sind Stale-Book-
+  Signaturen (Phantom-Klasse vom 04.07.); Shadow zeigt 0/750 Fills
+  selbst auf minutenlang sichtbaren Edges. Filter bleibt.
+- **Liquiditätsschwelle senken:** 2× unabhängig nachgemessen — unter
+  liq 2000 nur ~120-150 Zusatzmärkte mit Median-Ask-Summe 1.02-1.05.
+- **NegRisk in Phase 1/2:** Ökonomisch tot (Live-Scan des gesamten
+  Tails: beste Einzelgelegenheit +1.9 Cent/Set bei Tiefe 6 = 0.2 USDC),
+  ABER die »Nullmessung« war ein Coverage-Artefakt (nur 3 Events je
+  beobachtet, Cap 20) — Recorder-Abdeckung bei Gelegenheit verbreitern.
+- **Endgame-Fenster <300s für Krypto-Up/Down:** 95% der Profitmasse dort
+  sind Stale-Book-Phantome; bereinigt ~10-15 USDC/Tag. 300s bleibt.
+
+### Ehrliche strategische Konsequenz
+
+Der nach allen Filtern real handelbare, DEDUPLIZIERTE Komplement-Pool
+liegt bei ~1'000-1'300 USDC/Tag theoretischem Maximum (volle Tiefe, 100%
+Capture). Das 1'000er-Ziel ist mit reiner Taker-Komplement-Arb also nur
+erreichbar, wenn Capture UND Abdeckung nahe ans Maximum kommen —
+realistischer ist: Deadlock lösen → Capture sauber messen → skalieren,
+und parallel den nächsten Ertragsweg vorbereiten (Maker-Bein NUR mit
+gemessener Fill-Quote; In-play NUR mit Sportdaten-Feed = Weg B).
