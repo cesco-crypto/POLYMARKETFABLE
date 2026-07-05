@@ -13,7 +13,7 @@ import pytest
 from eth_account import Account
 
 import polybot.main as main
-from polybot import preflight
+from polybot import deposit_wallet, preflight
 from polybot.preflight import (MAX_UINT256, MIN_FUNDING_UNITS, Preflight,
                                build_funding_plan)
 
@@ -21,6 +21,8 @@ from polybot.preflight import (MAX_UINT256, MIN_FUNDING_UNITS, Preflight,
 TEST_KEY = "0x" + "11" * 32
 TEST_ADDR = Account.from_key(TEST_KEY).address
 ZERO_ADDR = "0x" + "00" * 20
+# Deterministische Deposit-Wallet-Adresse des Test-EOA (BeaconProxy-Form).
+TEST_DW = deposit_wallet.derive_beacon_deposit_wallet(TEST_ADDR)
 
 
 def make_w3(gas_price=30_000_000_000, pol=10**18, estimate=120_000, status=1):
@@ -33,6 +35,10 @@ def make_w3(gas_price=30_000_000_000, pol=10**18, estimate=120_000, status=1):
     w3.eth.get_balance.return_value = pol
     w3.eth.send_raw_transaction.return_value = b"\x12" * 32
     w3.eth.wait_for_transaction_receipt.return_value = {"status": status}
+    # Kein Code an keiner Adresse (Deposit Wallet gilt als nicht deployt);
+    # eth_call liefert Rohbytes, aus denen predictWalletAddress nichts liest
+    # (die On-Chain-Gegenprobe gilt in Tests als "nicht verfügbar").
+    w3.eth.get_code.return_value = b""
     return w3
 
 
@@ -44,17 +50,29 @@ def wire(contract_fn) -> None:
 
 def make_pf(execute=False, usdc=0, usdce=0, pusd=0, allowance=0,
             approved_all=True, w3=None, status=1, clob=None,
-            signature_type="0") -> tuple[Preflight, MagicMock]:
-    """Voll verdrahteter Preflight gegen eine gemockte web3-Instanz."""
+            signature_type="3", funder="", relayer_key="",
+            relayer_factory=None, dw_deployed=False) -> tuple[Preflight, MagicMock]:
+    """Voll verdrahteter Preflight gegen eine gemockte web3-Instanz.
+
+    funder=""/relayer_key="" bedeutet: nicht konfiguriert (unabhängig von
+    Umgebungsvariablen der Test-Maschine); dw_deployed steuert, ob am
+    Deposit Wallet Code liegt.
+    """
     w3 = w3 if w3 is not None else make_w3(status=status)
+    if dw_deployed:
+        w3.eth.get_code.side_effect = (
+            lambda addr: b"\xfe" if addr == TEST_DW else b"")
     pf = Preflight(TEST_KEY, signature_type=signature_type, execute=execute,
-                   w3=w3, clob_factory=(lambda: clob) if clob is not None else None)
+                   w3=w3, clob_factory=(lambda: clob) if clob is not None else None,
+                   funder=funder, relayer_api_key=relayer_key,
+                   relayer_factory=relayer_factory)
     pf.usdc.functions.balanceOf.return_value.call.return_value = usdc
     pf.usdce.functions.balanceOf.return_value.call.return_value = usdce
     pf.pusd.functions.balanceOf.return_value.call.return_value = pusd
     for token in (pf.usdc, pf.usdce, pf.pusd):
         token.functions.allowance.return_value.call.return_value = allowance
         wire(token.functions.approve)
+    wire(pf.pusd.functions.transfer)
     pf.ctf.functions.isApprovedForAll.return_value.call.return_value = approved_all
     wire(pf.ctf.functions.setApprovalForAll)
     wire(pf.router.functions.exactInputSingle)
@@ -100,7 +118,21 @@ def test_falscher_signatur_typ_wird_gemeldet():
     pf, _ = make_pf(signature_type="2")
     named = by_name(pf.run())
     assert named["Signatur-Typ"].status == "FEHLT"
-    assert "POLY_SIGNATURE_TYPE=0" in named["Signatur-Typ"].detail
+    assert "POLY_SIGNATURE_TYPE=3" in named["Signatur-Typ"].detail
+
+
+def test_eoa_signatur_typ_gilt_nicht_mehr():
+    # Seit dem Exchange-Upgrade lehnt der CLOB EOA-Maker ab — 0 ist FEHLT.
+    pf, _ = make_pf(signature_type="0")
+    named = by_name(pf.run())
+    assert named["Signatur-Typ"].status == "FEHLT"
+
+
+def test_signatur_typ_3_ist_ok():
+    pf, _ = make_pf(signature_type="3")
+    named = by_name(pf.run())
+    assert named["Signatur-Typ"].status == "OK"
+    assert "POLY_1271" in named["Signatur-Typ"].detail
 
 
 # ---- Balance-Auswertung ---------------------------------------------------------
@@ -357,6 +389,225 @@ def test_clob_adressabgleich_schlaegt_alarm_bei_fremder_adresse():
     named = by_name(pf.run())
     assert named["Abbruch"].status == "FEHLER"
     assert "erwartet" in named["Abbruch"].detail
+
+
+# ---- Deposit Wallet (POLY_1271) --------------------------------------------------------
+
+# Regressionsvektor der CREATE2-Ableitung: Owner des Live-Wallets -> die am
+# 05.07.2026 on-chain (factory.predictWalletAddress) bestätigte Adresse.
+LIVE_OWNER = "0x5cbED94234EaE9cbC0cea21c7c9c933C8a5ad159"
+LIVE_DW_BEACON = "0xd651247C926E627fC87A859b97c1CC885ca219ec"
+LIVE_DW_UUPS = "0xdf537A75bd568CFa9f72F1671d231fd616640444"
+
+
+def make_relayer(state=None) -> MagicMock:
+    """Relayer-Mock: submit-Aufrufe setzen state['granted']/state['deployed']."""
+    state = state if state is not None else {}
+    relayer = MagicMock()
+    relayer.get_nonce.return_value = 0
+
+    def _create():
+        state["deployed"] = True
+        return "txid-create"
+
+    def _batch(*args, **kwargs):
+        state["granted"] = True
+        return "txid-batch"
+
+    relayer.submit_wallet_create.side_effect = _create
+    relayer.submit_wallet_batch.side_effect = _batch
+    relayer.wait.return_value = {"transactionHash": "0xrelayed",
+                                 "state": "STATE_CONFIRMED"}
+    return relayer
+
+
+def test_deposit_wallet_ableitung_regressionsvektor():
+    assert deposit_wallet.derive_beacon_deposit_wallet(LIVE_OWNER) == LIVE_DW_BEACON
+    assert deposit_wallet.derive_uups_deposit_wallet(LIVE_OWNER) == LIVE_DW_UUPS
+
+
+def test_plan_meldet_deposit_wallet_adresse_und_funder_fehlt():
+    pf, w3 = make_pf()
+    named = by_name(pf.run())
+    assert named["Deposit-Wallet-Adresse"].status == "OK"
+    assert TEST_DW in named["Deposit-Wallet-Adresse"].detail
+    # Ohne POLY_FUNDER_ADDRESS: FEHLT mit der abgeleiteten Adresse zum Kopieren.
+    assert named["Funder-Konfiguration"].status == "FEHLT"
+    assert TEST_DW in named["Funder-Konfiguration"].detail
+    w3.eth.send_raw_transaction.assert_not_called()
+
+
+def test_funder_abgleich_ok_bei_passender_adresse():
+    pf, _ = make_pf(funder=TEST_DW.lower())  # Groß-/Kleinschreibung egal
+    named = by_name(pf.run())
+    assert named["Funder-Konfiguration"].status == "OK"
+
+
+def test_funder_abgleich_meldet_falsche_adresse():
+    pf, _ = make_pf(funder="0x" + "aa" * 20)
+    named = by_name(pf.run())
+    assert named["Funder-Konfiguration"].status == "FEHLT"
+    assert TEST_DW in named["Funder-Konfiguration"].detail
+
+
+def test_deployment_ohne_relayer_key_meldet_fehlt():
+    pf, _ = make_pf()
+    named = by_name(pf.run())
+    assert named["Deposit-Wallet-Deployment"].status == "FEHLT"
+    assert "polymarket.com/settings" in named["Deposit-Wallet-Deployment"].detail
+
+
+def test_deployment_plan_mit_relayer_key():
+    pf, _ = make_pf(relayer_key="relayer-key")
+    named = by_name(pf.run())
+    assert named["Deposit-Wallet-Deployment"].status == "PLAN"
+    assert "WALLET-CREATE" in named["Deposit-Wallet-Deployment"].detail
+
+
+def test_deployment_ok_wenn_code_vorhanden():
+    pf, _ = make_pf(dw_deployed=True)
+    named = by_name(pf.run())
+    assert named["Deposit-Wallet-Deployment"].status == "OK"
+
+
+def test_execute_deployt_deposit_wallet_via_relayer():
+    state = {"deployed": False}
+    relayer = make_relayer(state)
+    pf, w3 = make_pf(execute=True, allowance=2**200, clob=make_clob(),
+                     relayer_key="relayer-key", relayer_factory=lambda: relayer)
+    # Nach dem WALLET-CREATE liegt Code am Deposit Wallet (Receipt-Ersatz).
+    w3.eth.get_code.side_effect = (
+        lambda addr: b"\xfe" if state["deployed"] and addr == TEST_DW else b"")
+    named = by_name(pf.run())
+    relayer.submit_wallet_create.assert_called_once()
+    relayer.wait.assert_called_once_with("txid-create")
+    assert named["Deposit-Wallet-Deployment"].status == "AUSGEFÜHRT"
+    assert named["Deposit-Wallet-Deployment"].tx == "0xrelayed"
+
+
+def test_execute_bricht_ab_wenn_relayer_erfolg_ohne_code_meldet():
+    # Ehrlichkeit: der Relayer sagt "confirmed", aber on-chain liegt kein
+    # Code -> harter Abbruch statt Weitermachen auf Verdacht.
+    relayer = make_relayer()
+    pf, _ = make_pf(execute=True, allowance=2**200, clob=make_clob(),
+                    relayer_key="relayer-key", relayer_factory=lambda: relayer)
+    named = by_name(pf.run())
+    assert named["Abbruch"].status == "FEHLER"
+    assert "kein Code" in named["Abbruch"].detail
+    assert "CLOB-Anbindung" not in named
+
+
+def test_execute_relayer_fehlschlag_bricht_ab():
+    relayer = make_relayer()
+    relayer.wait.side_effect = deposit_wallet.DepositWalletError(
+        "Relayer-Transaktion txid-create endete als STATE_FAILED")
+    pf, _ = make_pf(execute=True, pusd=500_000_000, allowance=2**200,
+                    clob=make_clob(), relayer_key="relayer-key",
+                    relayer_factory=lambda: relayer)
+    named = by_name(pf.run())
+    assert named["Abbruch"].status == "FEHLER"
+    assert "STATE_FAILED" in named["Abbruch"].detail
+    # Nach dem Abbruch fließt kein Kapital mehr und keine Stufe läuft weiter.
+    pf.pusd.functions.transfer.assert_not_called()
+    assert "CLOB-Anbindung" not in named
+
+
+def test_deposit_approvals_ok_wenn_gesetzt():
+    pf, _ = make_pf(allowance=2**200, approved_all=True)
+    named = by_name(pf.run())
+    assert named["Deposit-Wallet-Approvals"].status == "OK"
+
+
+def test_deposit_approvals_plan_listet_fehlende():
+    pf, _ = make_pf(allowance=0, approved_all=False)
+    named = by_name(pf.run())
+    assert named["Deposit-Wallet-Approvals"].status == "PLAN"
+    assert "pUSD->CTF Exchange V2" in named["Deposit-Wallet-Approvals"].detail
+    assert "CTF->NegRisk Adapter" in named["Deposit-Wallet-Approvals"].detail
+
+
+def test_execute_setzt_deposit_approvals_als_relayer_batch():
+    state = {"granted": False}
+    relayer = make_relayer(state)
+    pf, w3 = make_pf(execute=True, clob=make_clob(), relayer_key="relayer-key",
+                     relayer_factory=lambda: relayer, dw_deployed=True)
+
+    # EOA hat alle Freigaben; das Deposit Wallet erst nach dem Batch.
+    def allowance_mock(owner, spender):
+        m = MagicMock()
+        m.call.return_value = (MAX_UINT256 if owner == TEST_ADDR
+                               or state["granted"] else 0)
+        return m
+
+    def afa_mock(owner, operator):
+        m = MagicMock()
+        m.call.return_value = owner == TEST_ADDR or state["granted"]
+        return m
+
+    pf.pusd.functions.allowance.side_effect = allowance_mock
+    pf.ctf.functions.isApprovedForAll.side_effect = afa_mock
+    pf.pusd.encode_abi = MagicMock(return_value="0x01")
+    pf.ctf.encode_abi = MagicMock(return_value="0x02")
+    named = by_name(pf.run())
+    assert named["Deposit-Wallet-Approvals"].status == "AUSGEFÜHRT"
+    assert named["Deposit-Wallet-Approvals"].tx == "0xrelayed"
+    wallet, nonce, deadline, calls, signature = (
+        relayer.submit_wallet_batch.call_args.args)
+    assert wallet == TEST_DW
+    assert nonce == 0
+    # 2x pUSD-approve + 3x setApprovalForAll, alle value=0, an das Wallet gerichtet.
+    assert len(calls) == 5
+    assert all(c["value"] == 0 for c in calls)
+    # Echte 65-Byte-EIP-712-Signatur des Owner-EOA über den Batch.
+    assert signature.startswith("0x") and len(signature) == 132
+    # Jede Call-Data wurde vor dem Batch aus Wallet-Sicht simuliert.
+    froms = [c.kwargs.get("from") or c.args[0].get("from")
+             for c in w3.eth.call.call_args_list
+             if (c.args and isinstance(c.args[0], dict))]
+    assert froms.count(TEST_DW) >= 5
+
+
+def test_execute_deposit_approvals_ohne_wallet_meldet_fehlt():
+    # Kein Relayer-Key, Wallet nicht deployt: execute kann den Batch nicht
+    # senden — FEHLT (kein Abbruch, die Anweisung steht im Deploy-Schritt).
+    pf, _ = make_pf(execute=True, allowance=0, approved_all=False,
+                    clob=make_clob())
+    named = by_name(pf.run())
+    assert named["Deposit-Wallet-Approvals"].status == "FEHLT"
+
+
+def test_funding_plan_zeigt_pusd_transfer():
+    pf, _ = make_pf(pusd=500_000_000)
+    named = by_name(pf.run())
+    assert named["pUSD->Deposit-Wallet"].status == "PLAN"
+    assert "500.00" in named["pUSD->Deposit-Wallet"].detail
+    assert TEST_DW in named["pUSD->Deposit-Wallet"].detail
+
+
+def test_funding_entfaellt_ohne_pusd():
+    pf, _ = make_pf(pusd=0)
+    named = by_name(pf.run())
+    assert named["pUSD->Deposit-Wallet"].status == "OK"
+
+
+def test_execute_transferiert_pusd_ins_deposit_wallet():
+    pf, w3 = make_pf(execute=True, pusd=500_000_000, allowance=2**200,
+                     clob=make_clob(), dw_deployed=True)
+    named = by_name(pf.run())
+    assert named["pUSD->Deposit-Wallet"].status == "AUSGEFÜHRT"
+    assert named["pUSD->Deposit-Wallet"].tx
+    pf.pusd.functions.transfer.assert_called_once_with(TEST_DW, 500_000_000)
+    assert w3.eth.send_raw_transaction.call_count == 1
+
+
+def test_execute_funding_wartet_auf_deployment():
+    # Wallet (noch) nicht deployt: Kapital bleibt auf dem EOA, kein Transfer.
+    pf, w3 = make_pf(execute=True, pusd=500_000_000, allowance=2**200,
+                     clob=make_clob())
+    named = by_name(pf.run())
+    assert named["pUSD->Deposit-Wallet"].status == "FEHLT"
+    pf.pusd.functions.transfer.assert_not_called()
+    w3.eth.send_raw_transaction.assert_not_called()
 
 
 # ---- CLI-Integration ------------------------------------------------------------------

@@ -17,16 +17,27 @@ from polybot.portfolio import Fill, Portfolio, Position, RestingOrder
 from polybot.strategies.base import Signal
 
 
+class FakeApiRejection(Exception):
+    """Definitive Server-Ablehnung wie PolyApiException (trägt status_code)."""
+
+    status_code = 400
+
+    def __init__(self, msg: str):
+        super().__init__(msg)
+
+
 class FakeClobClient:
     """Minimaler ClobClient-Ersatz: konfigurierbare Antworten, kein Netzwerk."""
 
     def __init__(self, fail_tokens=None, statuses=None, responses=None,
-                 tick_fail_once=None, raise_tokens=None, text_response_tokens=None):
+                 tick_fail_once=None, raise_tokens=None, text_response_tokens=None,
+                 reject_400=None):
         self.fail_tokens = fail_tokens or set()
         self.statuses = statuses or {}            # token_id -> status in der post_order-Antwort
         self.responses = responses or {}          # token_id -> zusätzliche Response-Felder
         self.tick_fail_once = set(tick_fail_once or set())  # 1x "invalid tick size"
         self.raise_tokens = raise_tokens or set()           # post_order wirft Exception
+        self.reject_400 = reject_400 or {}        # token_id -> Fehlertext (HTTP-400-Exception)
         self.text_response_tokens = text_response_tokens or set()  # 200 ohne JSON
         self.posted: list[str] = []               # token_ids in Sendereihenfolge
         self.posted_types: list[str] = []         # zugehörige OrderTypes
@@ -51,6 +62,8 @@ class FakeClobClient:
         self.posted_types.append(otype)
         if tok in self.raise_tokens:
             raise RuntimeError("Request exception!")
+        if tok in self.reject_400:
+            raise FakeApiRejection(self.reject_400[tok])
         if tok in self.text_response_tokens:
             return "Internal Server Error"
         if tok in self.tick_fail_once:
@@ -79,14 +92,18 @@ class FakeClobClient:
         self.cancelled.append(payload.orderID)
 
 
-def make_live_broker(client: FakeClobClient) -> LiveBroker:
+def make_live_broker(client: FakeClobClient, cooldown_s: float = 0.0) -> LiveBroker:
     # __init__ umgehen (verlangt Key + Netzwerk); nur die Felder setzen,
-    # die execute() braucht.
+    # die execute() braucht. Cooldown default 0 = aus (Alt-Verhalten),
+    # die Cooldown-Tests setzen ihn explizit.
     broker = LiveBroker.__new__(LiveBroker)
     broker.client = client
     broker._open_orders = {}
     broker._pending = {}
     broker.fallback_fee_rate = 0.0
+    broker.reject_cooldown_s = cooldown_s
+    broker._reject_until = {}
+    broker._fatal_reject = None
     broker.DELAY_POLL_INTERVAL_S = 0  # Tests sollen nicht schlafen
     return broker
 
@@ -304,6 +321,180 @@ def test_livebroker_delayed_ohne_bestaetigung_wird_gecancelt():
     assert fills == 0
     assert pf.positions == {}
     assert "oid1" in client.cancelled  # sonst könnte das Bein später ungehedged matchen
+
+
+# ---- LiveBroker: Initialisierung (Deposit-Wallet-Flow) -----------------------
+
+class _CapturingClobClient:
+    """Fängt die ClobClient-Konstruktorargumente ab, kein Netzwerk."""
+
+    captured: dict = {}
+
+    def __init__(self, host, **kwargs):
+        type(self).captured = {"host": host, **kwargs}
+
+    def create_or_derive_api_key(self):
+        return "creds"
+
+    def set_api_creds(self, creds):
+        self.creds = creds
+
+    def get_address(self):
+        return "0xEOA"
+
+
+def _live_cfg(funder: str | None, signature_type: int) -> BotConfig:
+    cfg = BotConfig()
+    cfg.private_key = "0x" + "11" * 32
+    cfg.funder_address = funder
+    cfg.signature_type = signature_type
+    cfg.risk.live_auto_merge = False  # kein MergeExecutor/RPC im Test
+    return cfg
+
+
+def test_livebroker_init_deposit_wallet_modus(monkeypatch):
+    # POLY_FUNDER_ADDRESS + POLY_SIGNATURE_TYPE=3: der ClobClient bekommt
+    # funder (Deposit Wallet) und signature_type 3 (POLY_1271).
+    import py_clob_client_v2.client as clob_mod
+
+    monkeypatch.setattr(clob_mod, "ClobClient", _CapturingClobClient)
+    LiveBroker(_live_cfg("0x" + "d1" * 20, 3))
+    captured = _CapturingClobClient.captured
+    assert captured["funder"] == "0x" + "d1" * 20
+    assert captured["signature_type"] == 3
+    assert captured["key"] == "0x" + "11" * 32
+
+
+def test_livebroker_init_ohne_funder_bleibt_eoa(monkeypatch):
+    import py_clob_client_v2.client as clob_mod
+
+    monkeypatch.setattr(clob_mod, "ClobClient", _CapturingClobClient)
+    _CapturingClobClient.captured = {}
+    LiveBroker(_live_cfg(None, 3))
+    assert "funder" not in _CapturingClobClient.captured
+    assert "signature_type" not in _CapturingClobClient.captured
+
+
+def test_livebroker_init_uebernimmt_cooldown_config(monkeypatch):
+    import py_clob_client_v2.client as clob_mod
+
+    monkeypatch.setattr(clob_mod, "ClobClient", _CapturingClobClient)
+    cfg = _live_cfg(None, 3)
+    cfg.risk.order_reject_cooldown_s = 42.0
+    broker = LiveBroker(cfg)
+    assert broker.reject_cooldown_s == 42.0
+    assert broker._reject_until == {}
+    assert broker._fatal_reject is None
+
+
+# ---- LiveBroker: Reject-Cooldown & Fatal-Sperre -----------------------------
+
+def test_livebroker_cooldown_nach_http_400(monkeypatch):
+    # Harte 400-Ablehnung: das Token bekommt einen Cooldown — im Fenster
+    # geht KEINE weitere Order auf dieses Token raus, danach wieder.
+    client = FakeClobClient(reject_400={"tok": "not enough balance"})
+    broker = make_live_broker(client, cooldown_s=60.0)
+    pf = Portfolio(cash=100.0)
+    sig = Signal(token_id="tok", side="BUY", price=0.50, size=10, reason="MM")
+
+    now = time.time()
+    monkeypatch.setattr("polybot.execution.time.time", lambda: now)
+    broker.execute([sig], {}, pf)
+    assert client.posted == ["tok"]
+
+    # Innerhalb des Cooldowns: kein erneuter POST-Versuch.
+    broker.execute([sig], {}, pf)
+    assert client.posted == ["tok"]
+
+    # Nach Ablauf des Fensters wird wieder versucht.
+    monkeypatch.setattr("polybot.execution.time.time", lambda: now + 60.1)
+    broker.execute([sig], {}, pf)
+    assert client.posted == ["tok", "tok"]
+
+
+def test_livebroker_cooldown_auch_bei_success_false(monkeypatch):
+    # Auch eine 200-Antwort mit success=false ist eine harte Ablehnung.
+    client = FakeClobClient(fail_tokens={"tok"})  # success=false
+    broker = make_live_broker(client, cooldown_s=60.0)
+    pf = Portfolio(cash=100.0)
+    sig = Signal(token_id="tok", side="BUY", price=0.50, size=10, reason="MM")
+    now = time.time()
+    monkeypatch.setattr("polybot.execution.time.time", lambda: now)
+    broker.execute([sig], {}, pf)
+    broker.execute([sig], {}, pf)
+    assert client.posted == ["tok"]
+    # Andere Tokens sind vom Cooldown NICHT betroffen.
+    broker.execute([Signal(token_id="anders", side="BUY", price=0.50, size=10,
+                           reason="MM")], {}, pf)
+    assert client.posted == ["tok", "anders"]
+
+
+def test_livebroker_cooldown_null_deaktiviert(monkeypatch):
+    # cooldown_s=0 (Config aus): Alt-Verhalten, jeder Tick versucht erneut.
+    client = FakeClobClient(fail_tokens={"tok"})
+    broker = make_live_broker(client, cooldown_s=0.0)
+    pf = Portfolio(cash=100.0)
+    sig = Signal(token_id="tok", side="BUY", price=0.50, size=10, reason="MM")
+    broker.execute([sig], {}, pf)
+    broker.execute([sig], {}, pf)
+    assert client.posted == ["tok", "tok"]
+
+
+def test_livebroker_maker_not_allowed_sperrt_dauerhaft(caplog):
+    # "maker address not allowed" ist ein Konfigurationsfehler: dauerhafte
+    # Sperre bis Prozessende, EIN klarer Hinweis im Log statt Spam.
+    import logging
+
+    client = FakeClobClient(
+        reject_400={"tok": '{"error":"maker address not allowed, please use '
+                           'the deposit wallet flow"}'})
+    broker = make_live_broker(client, cooldown_s=60.0)
+    pf = Portfolio(cash=100.0)
+    sig = Signal(token_id="tok", side="BUY", price=0.50, size=10, reason="MM")
+    other = Signal(token_id="anders", side="BUY", price=0.50, size=10, reason="MM")
+
+    with caplog.at_level(logging.ERROR, logger="polybot.execution"):
+        broker.execute([sig], {}, pf)
+        # Sperre gilt kontoweit: auch ANDERE Tokens werden nicht mehr versucht.
+        broker.execute([other], {}, pf)
+        broker.execute([sig, other], {}, pf)
+    assert client.posted == ["tok"]
+    hints = [r for r in caplog.records
+             if "KONFIGURATIONSFEHLER" in r.getMessage()]
+    assert len(hints) == 1  # genau EIN Hinweis
+    assert "preflight" in hints[0].getMessage()
+    assert "POLY_SIGNATURE_TYPE=3" in hints[0].getMessage()
+
+
+def test_livebroker_fatal_sperre_reconciled_weiter():
+    # Die Sperre stoppt nur NEUE Orders — Fills bereits ruhender Orders
+    # werden weiterhin nachgebucht (Portfolio-Ehrlichkeit).
+    client = FakeClobClient()
+    broker = make_live_broker(client)
+    pf = Portfolio(cash=100.0)
+    broker.execute([Signal(token_id="tok", side="BUY", price=0.50, size=10,
+                           reason="MM")], {}, pf)
+    broker._fatal_reject = "maker address not allowed"
+    client.orders["oid1"] = {"status": "matched", "size_matched": "10",
+                             "price": "0.50"}
+    assert broker.execute([Signal(token_id="neu", side="BUY", price=0.50,
+                                  size=10, reason="MM")], {}, pf) == 1
+    assert pf.positions["tok"].shares == pytest.approx(10)
+    assert client.posted == ["tok"]  # "neu" wurde nie versucht
+
+
+def test_livebroker_cooldown_bein_bricht_gruppe_ab(monkeypatch):
+    # Ein Bein im Cooldown -> die ganze Arb-Gruppe wird nicht (weiter) gesendet.
+    client = FakeClobClient(reject_400={"t1": "not enough balance"})
+    broker = make_live_broker(client, cooldown_s=60.0)
+    pf = Portfolio(cash=100.0)
+    now = time.time()
+    monkeypatch.setattr("polybot.execution.time.time", lambda: now)
+    broker.execute([arb_leg("t1", group="g1")], {}, pf)
+    assert client.posted == ["t1"]
+    # Neuer Tick, gleiche Gruppe: t1 ist blockiert -> t2 darf nicht mehr raus.
+    broker.execute([arb_leg("t1", group="g2"), arb_leg("t2", group="g2")], {}, pf)
+    assert client.posted == ["t1"]
 
 
 # ---- PaperBroker ------------------------------------------------------------

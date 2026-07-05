@@ -44,6 +44,13 @@ class RiskConfig:
     # polybot/onchain.py). Erfordert POL für Gas auf dem Signer-Wallet;
     # Fehler werden nur geloggt und stoppen nie den Bot-Loop.
     live_auto_merge: bool = True
+    # Live-Modus: nach einer harten Order-Ablehnung (HTTP 400/403 bzw.
+    # success=false) KEINE erneuten Versuche auf demselben Token für so viele
+    # Sekunden — der Ablehnungsgrund (Balance, Tick, Markt zu) ändert sich
+    # nicht im Sekundentakt, und Wiederholungs-Spam kostet Rate-Limit-Budget.
+    # Konfigurationsfehler wie "maker address not allowed" sperren unabhängig
+    # davon dauerhaft bis zum Prozessende (siehe execution.LiveBroker).
+    order_reject_cooldown_s: float = 60.0
 
 
 @dataclass
@@ -198,9 +205,22 @@ class BotConfig:
         if not 0.0 <= cfg.strategy.maker_rebate_rate <= 0.1:
             raise SystemExit("strategy.maker_rebate_rate muss zwischen 0 und 0.1 liegen "
                              "(realistisch sind 20-25% der Taker-Rate, also <= 0.0175)")
+        if cfg.risk.order_reject_cooldown_s < 0:
+            raise SystemExit("risk.order_reject_cooldown_s darf nicht negativ "
+                             "sein (0 = Cooldown aus)")
         cfg.private_key = os.environ.get("POLY_PRIVATE_KEY")
         cfg.funder_address = os.environ.get("POLY_FUNDER_ADDRESS")
-        cfg.signature_type = int(os.environ.get("POLY_SIGNATURE_TYPE", "2"))
+        try:
+            cfg.signature_type = int(os.environ.get("POLY_SIGNATURE_TYPE", "2"))
+        except ValueError:
+            raise SystemExit("POLY_SIGNATURE_TYPE muss eine Zahl sein "
+                             "(0=EOA, 1=POLY_PROXY, 2=POLY_GNOSIS_SAFE, "
+                             "3=POLY_1271/Deposit-Wallet)") from None
+        if cfg.signature_type not in (0, 1, 2, 3):
+            raise SystemExit(
+                f"POLY_SIGNATURE_TYPE={cfg.signature_type} ist ungültig — "
+                "erlaubt: 0 (EOA), 1 (POLY_PROXY), 2 (POLY_GNOSIS_SAFE), "
+                "3 (POLY_1271, Deposit-Wallet-Flow)")
         if cfg.mode == "live" and not cfg.private_key:
             raise SystemExit(
                 "Live-Modus verlangt POLY_PRIVATE_KEY in der Umgebung (.env). "

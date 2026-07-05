@@ -28,16 +28,42 @@ if [ ! -d .venv ]; then "$PY" -m venv .venv; fi
 echo "Abhängigkeiten installiert."
 
 # 3) .env anlegen (Key wird verdeckt eingelesen, niemals geloggt)
+FUNDER="0xd651247C926E627fC87A859b97c1CC885ca219ec"  # Deposit Wallet zu 0x5cbE…d159
 if [ ! -f .env ]; then
   echo
   echo "Private Key des POLYBOT-Wallets (Eingabe bleibt unsichtbar):"
   read -rs PK
   umask 077
-  printf 'POLY_PRIVATE_KEY=%s\nPOLY_SIGNATURE_TYPE=0\n' "$PK" > .env
+  printf 'POLY_PRIVATE_KEY=%s\n' "$PK" > .env
   unset PK
   echo ".env angelegt (chmod 600, git-ignoriert)."
-else
-  echo ".env existiert bereits — unverändert gelassen."
+fi
+
+# 3b) Deposit-Wallet-Variablen nachziehen (V2-CLOB verlangt den
+#     Deposit-Wallet-Flow; Signaturtyp 3 = POLY_1271).
+grep -q '^POLY_SIGNATURE_TYPE=3$' .env || {
+  sed -i '' '/^POLY_SIGNATURE_TYPE=/d' .env 2>/dev/null || sed -i '/^POLY_SIGNATURE_TYPE=/d' .env
+  echo 'POLY_SIGNATURE_TYPE=3' >> .env
+  echo "POLY_SIGNATURE_TYPE=3 gesetzt (Deposit-Wallet-Flow)."
+}
+grep -q '^POLY_FUNDER_ADDRESS=' .env || {
+  echo "POLY_FUNDER_ADDRESS=$FUNDER" >> .env
+  echo "POLY_FUNDER_ADDRESS=$FUNDER gesetzt."
+}
+if ! grep -q '^POLY_RELAYER_API_KEY=.\+' .env; then
+  echo
+  echo "Relayer-API-Key (polymarket.com/settings?tab=api-keys, mit dem"
+  echo "Bot-Wallet eingeloggt erzeugen). Eingabe unsichtbar; leer = später:"
+  read -rs RK
+  if [ -n "$RK" ]; then
+    sed -i '' '/^POLY_RELAYER_API_KEY=/d' .env 2>/dev/null || sed -i '/^POLY_RELAYER_API_KEY=/d' .env
+    printf 'POLY_RELAYER_API_KEY=%s\n' "$RK" >> .env
+    echo "POLY_RELAYER_API_KEY gesetzt."
+  else
+    echo "Übersprungen — ohne den Key kann der Preflight das Deposit Wallet"
+    echo "nicht deployen (siehe MACBOOK_LIVE.md, Abschnitt Deposit Wallet)."
+  fi
+  unset RK
 fi
 
 # 4) Schlüssel verifizieren (muss auf 0x5cbE…d159 ableiten)

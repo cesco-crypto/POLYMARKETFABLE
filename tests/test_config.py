@@ -74,3 +74,29 @@ def test_paper_fill_delay_default_und_yaml_ladbar(tmp_path):
     assert BotConfig().strategy.paper_fill_delay_ticks == 1
     p = write_config(tmp_path, "strategy:\n  paper_fill_delay_ticks: 0\n")
     assert BotConfig.load(p).strategy.paper_fill_delay_ticks == 0
+
+
+def test_signature_type_3_wird_akzeptiert(tmp_path, monkeypatch):
+    # Deposit-Wallet-Flow (POLY_1271) — seit dem Exchange-Upgrade der einzige
+    # Weg, wie der V2-CLOB Orders akzeptiert.
+    monkeypatch.setenv("POLY_SIGNATURE_TYPE", "3")
+    p = write_config(tmp_path, "mode: paper\n")
+    assert BotConfig.load(p).signature_type == 3
+
+
+@pytest.mark.parametrize("value", ["4", "-1", "kaputt"])
+def test_unbekannter_signature_type_wird_abgewiesen(tmp_path, monkeypatch, value):
+    monkeypatch.setenv("POLY_SIGNATURE_TYPE", value)
+    p = write_config(tmp_path, "mode: paper\n")
+    with pytest.raises(SystemExit):
+        BotConfig.load(p)
+
+
+def test_order_reject_cooldown_default_und_validierung(tmp_path):
+    # Default 60s; negativ ist ein Konfigurationsfehler (0 = aus).
+    assert BotConfig().risk.order_reject_cooldown_s == 60.0
+    p = write_config(tmp_path, "risk:\n  order_reject_cooldown_s: -1\n")
+    with pytest.raises(SystemExit):
+        BotConfig.load(p)
+    p = write_config(tmp_path, "risk:\n  order_reject_cooldown_s: 0\n")
+    assert BotConfig.load(p).risk.order_reject_cooldown_s == 0

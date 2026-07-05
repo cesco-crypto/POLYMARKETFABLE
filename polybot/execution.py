@@ -430,6 +430,9 @@ class LiveBroker(Broker):
     DELAY_POLL_INTERVAL_S = 0.5
     # Nach so vielen erfolglosen get_order-Abfragen wird das Tracking beendet.
     MAX_RECONCILE_MISSES = 10
+    # Ablehnungstexte, die einen Konfigurationsfehler bedeuten: Wiederholen
+    # ist zwecklos, bis der Betreiber eingreift -> Sperre bis Prozessende.
+    FATAL_REJECT_MARKERS = ("maker address not allowed",)
 
     def __init__(self, cfg: BotConfig):
         from py_clob_client_v2.client import ClobClient
@@ -439,11 +442,24 @@ class LiveBroker(Broker):
             "chain_id": POLYGON_CHAIN_ID,
         }
         if cfg.funder_address:
+            # Deposit-Wallet-Flow (POLY_SIGNATURE_TYPE=3/POLY_1271) bzw.
+            # Proxy-Wallets: maker/funder ist das Smart-Contract-Wallet,
+            # signiert wird weiterhin mit dem EOA-Key.
             kwargs["signature_type"] = cfg.signature_type
             kwargs["funder"] = cfg.funder_address
+            if cfg.signature_type == 3:
+                log.info("Deposit-Wallet-Modus: Orders als POLY_1271, "
+                         "Funder %s", cfg.funder_address)
         self.client = ClobClient(CLOB_HOST, **kwargs)
         self.client.set_api_creds(self.client.create_or_derive_api_key())
         self.fallback_fee_rate = cfg.risk.taker_fee_rate
+        # Reject-Cooldown: Token nach harter Ablehnung (400/403) so viele
+        # Sekunden nicht erneut versuchen; None-Eintrag gibt es nicht.
+        self.reject_cooldown_s = cfg.risk.order_reject_cooldown_s
+        self._reject_until: dict[str, float] = {}
+        # Konfigurationsfehler (z.B. "maker address not allowed"): dauerhaft
+        # bis Prozessende gesperrt, EIN klarer Log-Hinweis statt Spam.
+        self._fatal_reject: str | None = None
         # Ruhende eigene Orders (GTC-Quotes) je Token — werden vor dem
         # Neu-Quoten gecancelt, damit sich keine veralteten Quotes stapeln.
         self._open_orders: dict[str, list[str]] = {}
@@ -474,6 +490,13 @@ class LiveBroker(Broker):
         # Zuerst reale (Teil-)Fills ruhender Orders nachbuchen — Portfolio und
         # Risiko-Limits dürfen weder Phantom- noch fehlende Positionen sehen.
         fills = self._reconcile_pending(portfolio, fee_rates)
+        if self._fatal_reject is not None:
+            # Konfigurationsfehler: der Hinweis stand EINMAL im Log (siehe
+            # _register_reject) — hier nur noch leise verwerfen, kein Spam.
+            if signals:
+                log.debug("%d Signal(e) verworfen — Orders gesperrt seit: %s",
+                          len(signals), self._fatal_reject)
+            return fills
         # FOK sichert nur die Einzelorder, nicht die Arb-Gruppe: scheitert ein
         # Bein, dürfen die restlichen Beine der Gruppe nicht mehr raus.
         failed_groups: set[str] = set()
@@ -483,6 +506,16 @@ class LiveBroker(Broker):
             if s.group and s.group in failed_groups:
                 log.warning("Gruppe %s: Bein %s übersprungen, da ein voriges Bein scheiterte",
                             s.group, s.token_id[:12])
+                continue
+            if self._fatal_reject is not None or self._token_blocked(s.token_id):
+                # Reject-Cooldown bzw. mid-Tick erkannter Konfigurationsfehler:
+                # dieselbe Order würde nur wieder abgelehnt.
+                log.debug("Token %s im Reject-Cooldown — Signal übersprungen",
+                          s.token_id[:12])
+                if s.group:
+                    self._abort_group(s, failed_groups)
+                    fills += self._unwind_group(s.group, group_fills, books,
+                                                portfolio, fee_rates)
                 continue
             try:
                 if s.replace and s.token_id not in refreshed:
@@ -549,6 +582,16 @@ class LiveBroker(Broker):
         try:
             resp = self.client.post_order(order, otype)
         except Exception as e:  # noqa: BLE001
+            if getattr(e, "status_code", None) in (400, 403):
+                # Definitive Server-Ablehnung (nichts unterwegs): erst der
+                # Tick-Retry-Sonderfall, sonst Cooldown statt Wiederholungs-Spam.
+                if tick_size is None and _looks_like_tick_error(str(e)):
+                    return self._retry_with_fresh_tick(s, otype, portfolio, fee_rates)
+                log.warning("Order abgelehnt (HTTP %s, %s): %s",
+                            getattr(e, "status_code", "?"),
+                            s.market_question[:40], e)
+                self._register_reject(s.token_id, str(e))
+                return "failed", None
             # Timeout & Co.: Der Server kann die Order trotzdem angenommen
             # haben -> Zustand verifizieren statt still weitermachen.
             log.error("POST /order unklar gescheitert (%s): %s — verifiziere Orderzustand",
@@ -565,6 +608,7 @@ class LiveBroker(Broker):
             if tick_size is None and _looks_like_tick_error(str(resp)):
                 return self._retry_with_fresh_tick(s, otype, portfolio, fee_rates)
             log.warning("Order abgelehnt: %s", resp)
+            self._register_reject(s.token_id, str(resp))
             return "failed", None
         return self._book_response(s, resp, price, otype, portfolio, fee_rates)
 
@@ -725,6 +769,43 @@ class LiveBroker(Broker):
             return None
 
     # ---- Fehlerbehandlung ----------------------------------------------------
+
+    def _token_blocked(self, token_id: str) -> bool:
+        """Steht das Token noch im Reject-Cooldown? (Abgelaufene Einträge weg.)"""
+        until = self._reject_until.get(token_id)
+        if until is None:
+            return False
+        if time.time() >= until:
+            del self._reject_until[token_id]
+            return False
+        return True
+
+    def _register_reject(self, token_id: str, message: str) -> None:
+        """Harte Ablehnung verbuchen: Token-Cooldown bzw. dauerhafte Sperre.
+
+        "maker address not allowed" & Co. sind Konfigurationsfehler des
+        Kontos (Deposit-Wallet-Flow fehlt) — jede weitere Order würde
+        identisch abgelehnt: dauerhaft sperren, EIN klarer Hinweis im Log.
+        Alles andere (Balance, geschlossener Markt, ...) bekommt einen
+        Token-Cooldown von reject_cooldown_s Sekunden.
+        """
+        text = message.lower()
+        if any(marker in text for marker in self.FATAL_REJECT_MARKERS):
+            if self._fatal_reject is None:
+                self._fatal_reject = message
+                log.error(
+                    "Order-Ablehnung ist ein KONFIGURATIONSFEHLER: %s — der "
+                    "V2-CLOB verlangt den Deposit-Wallet-Flow. Abhilfe: "
+                    "python -m polybot.main preflight --execute ausführen und "
+                    "POLY_FUNDER_ADDRESS=<Deposit-Wallet> sowie "
+                    "POLY_SIGNATURE_TYPE=3 in .env setzen. Bis zum Neustart "
+                    "werden KEINE weiteren Orders versucht.", message)
+            return
+        if self.reject_cooldown_s > 0:
+            self._reject_until[token_id] = time.time() + self.reject_cooldown_s
+            log.warning("Token %s für %.0fs im Order-Cooldown nach harter "
+                        "Ablehnung: %s", token_id[:12], self.reject_cooldown_s,
+                        message[:160])
 
     def _cancel_open_orders(self, token_id: str) -> None:
         """Zuvor platzierte ruhende Orders eines Tokens canceln.

@@ -1,4 +1,4 @@
-"""Go-Live-Preflight für ein EOA-Wallet (POLY_PRIVATE_KEY, POLY_SIGNATURE_TYPE=0).
+"""Go-Live-Preflight (POLY_PRIVATE_KEY + Deposit-Wallet-Flow, POLY_SIGNATURE_TYPE=3).
 
 Die komplette Startstrecke vor dem ersten Live-Trade, als CLI-Kommando:
 
@@ -14,26 +14,43 @@ Stufen (jede endet als OK / FEHLT / PLAN / AUSGEFÜHRT / FEHLER im Bericht):
      wrap(address,address,uint256) ist per Bytecode-Analyse verifiziert,
      die Argument-Deutung nicht — vor dem Senden werden alle Kandidaten
      per eth_call mit den echten Parametern simuliert).
-  5. Trading-Approvals setzen (nur falls fehlend): pUSD an beide V2-Exchanges,
-     ConditionalTokens-Operator-Freigabe an beide Exchanges + NegRisk Adapter.
-  6. CLOB-Anbindung testen (create_or_derive_api_key, Adress-Abgleich).
+  5. Trading-Approvals des EOA (nur falls fehlend; für Onramp/Merges weiter
+     nötig): pUSD an beide V2-Exchanges, CTF-Operator-Freigaben.
+  6. Deposit Wallet (seit Exchange-Upgrade 28.04.2026 Pflicht — der CLOB
+     lehnt EOA-Maker mit "maker address not allowed" ab):
+     a. Adresse deterministisch ableiten + on-chain gegen
+        factory.predictWalletAddress verifizieren; POLY_FUNDER_ADDRESS-Abgleich.
+     b. Deployment prüfen; fehlt es: WALLET-CREATE über den Polymarket-
+        Relayer (gasless, braucht POLY_RELAYER_API_KEY aus der UI).
+     c. Approvals AUS dem Deposit Wallet (pUSD an beide V2-Exchanges,
+        CTF-Operator-Freigaben) — als EIP-712-signierter Relayer-Batch,
+        jede Call-Data vorher per eth_call aus Wallet-Sicht simuliert.
+     d. pUSD vom EOA in das Deposit Wallet transferieren (ERC20-Transfer,
+        vorher per eth_call simuliert) — EOA-pUSD zählt NICHT als
+        CLOB-Buying-Power des Deposit Wallets.
+  7. CLOB-Anbindung testen (create_or_derive_api_key, Adress-Abgleich,
+     Balance-Sync mit signature_type=3).
 
 Fehlerphilosophie: Im execute-Modus bricht JEDER fehlgeschlagene Schritt
-(Revert, Receipt status=0, zu wenig POL, RPC down) die Strecke sauber ab —
-es wird nie halbfertig weitergemacht. Im Plan-Modus wird nichts gesendet,
-nur gelesen und der Plan gedruckt.
+(Revert, Receipt status=0, zu wenig POL, RPC down, Relayer-Fehlschlag) die
+Strecke sauber ab — es wird nie halbfertig weitergemacht. Im Plan-Modus
+wird nichts gesendet, nur gelesen und der Plan gedruckt.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 
 from rich.console import Console
 from rich.table import Table
 
 from polybot.config import CLOB_HOST, POLYGON_CHAIN_ID, BotConfig
+from polybot.deposit_wallet import (DepositWalletError, DepositWalletRelayer,
+                                    predict_wallet_address_onchain,
+                                    resolve_deposit_wallet, sign_wallet_batch)
 from polybot.onchain import (CTF_ABI, CTF_ADDRESS, GAS_LIMIT_BUFFER,
                              NEG_RISK_ADAPTER_ADDRESS, PUSD_ADDRESS,
                              RECEIPT_TIMEOUT_S)
@@ -241,12 +258,23 @@ class Preflight:
     """
 
     def __init__(self, private_key: str | None, signature_type: str = "0",
-                 execute: bool = False, w3=None, clob_factory=None):
+                 execute: bool = False, w3=None, clob_factory=None,
+                 funder: str | None = None, relayer_api_key: str | None = None,
+                 relayer_factory=None):
         self.private_key = private_key
         self.signature_type = signature_type
         self.execute = execute
         self.w3 = w3
         self._clob_factory = clob_factory
+        # Deposit-Wallet-Flow: Ziel-Funder aus der Umgebung (Abgleich mit der
+        # abgeleiteten Adresse), Relayer-API-Key für Deploy/Approval-Batches.
+        self.funder = funder if funder is not None \
+            else os.environ.get("POLY_FUNDER_ADDRESS")
+        self.relayer_api_key = relayer_api_key if relayer_api_key is not None \
+            else os.environ.get("POLY_RELAYER_API_KEY")
+        self._relayer_factory = relayer_factory
+        self.deposit_wallet: str | None = None
+        self.dw_deployed = False
         self.account = None
         self.steps: list[StepResult] = []
         if self.w3 is not None:
@@ -269,6 +297,10 @@ class Preflight:
             self._step_swap(plan)
             self._step_wrap(plan)
             self._step_trading_approvals()
+            self._step_deposit_wallet()
+            self._step_deposit_deploy()
+            self._step_deposit_approvals()
+            self._step_deposit_funding()
             self._step_clob()
         except PreflightError as e:
             log.error("Preflight abgebrochen: %s", e)
@@ -291,14 +323,18 @@ class Preflight:
             self._add("Wallet-Key", "FEHLT", f"POLY_PRIVATE_KEY unbrauchbar: {e}")
             return False
         self._add("Wallet-Key", "OK", f"Adresse {self.account.address}")
-        if str(self.signature_type) == "0":
-            self._add("Signatur-Typ", "OK", "POLY_SIGNATURE_TYPE=0 (EOA)")
+        if str(self.signature_type) == "3":
+            self._add("Signatur-Typ", "OK",
+                      "POLY_SIGNATURE_TYPE=3 (POLY_1271, Deposit-Wallet-Flow)")
         else:
-            # Kein Abbruch: die On-Chain-Stufen hängen nicht am Signatur-Typ,
-            # aber der Handel über den CLOB braucht für ein EOA zwingend 0.
+            # Kein Abbruch: die On-Chain-Stufen hängen nicht am Signatur-Typ.
+            # Aber der V2-CLOB lehnt EOA-Maker seit dem Exchange-Upgrade ab
+            # ("maker address not allowed, please use the deposit wallet flow")
+            # — Orders brauchen zwingend signature_type 3 + Deposit Wallet.
             self._add("Signatur-Typ", "FEHLT",
-                      "POLY_SIGNATURE_TYPE=0 (EOA) in der Umgebung setzen — "
-                      f"aktuell {self.signature_type!r}")
+                      "POLY_SIGNATURE_TYPE=3 (Deposit-Wallet-Flow) in der "
+                      f"Umgebung setzen — aktuell {self.signature_type!r}; "
+                      "EOA-Orders (0) lehnt der V2-CLOB ab")
         return True
 
     # ---- Stufe 2: RPC + Guthaben -------------------------------------------------
@@ -549,14 +585,220 @@ class Preflight:
         tx = self._send(self.ctf.functions.setApprovalForAll(operator, True), name)
         self._add(name, "AUSGEFÜHRT", "setApprovalForAll(operator, true)", tx=tx)
 
-    # ---- Stufe 6: CLOB-Anbindung ----------------------------------------------------
+    # ---- Stufe 6: Deposit Wallet (POLY_1271) ------------------------------------------
+
+    # Deadline-Fenster für signierte Wallet-Batches (Relayer-Vorgabe: zukünftig,
+    # nicht zu weit weg — die SDK-Beispiele nutzen +600s).
+    BATCH_DEADLINE_S = 600
+
+    def _relayer(self) -> DepositWalletRelayer:
+        if self._relayer_factory is not None:
+            return self._relayer_factory()
+        return DepositWalletRelayer(self.relayer_api_key, self.account.address)
+
+    def _step_deposit_wallet(self) -> None:
+        """Deposit-Wallet-Adresse ableiten und POLY_FUNDER_ADDRESS abgleichen."""
+        name = "Deposit-Wallet-Adresse"
+        try:
+            self.deposit_wallet = resolve_deposit_wallet(self.w3,
+                                                         self.account.address)
+        except DepositWalletError as e:
+            raise PreflightError(f"{name}: {e}") from e
+        confirmed = predict_wallet_address_onchain(self.w3, self.account.address)
+        probe = ("on-chain bestätigt (factory.predictWalletAddress)"
+                 if confirmed and confirmed.lower() == self.deposit_wallet.lower()
+                 else "Gegenprobe nicht verfügbar — lokale CREATE2-Ableitung")
+        self._add(name, "OK", f"{self.deposit_wallet} ({probe})")
+        if not self.funder:
+            self._add("Funder-Konfiguration", "FEHLT",
+                      f"POLY_FUNDER_ADDRESS={self.deposit_wallet} in .env "
+                      "setzen (der LiveBroker adressiert Orders darüber)")
+        elif self.funder.lower() != self.deposit_wallet.lower():
+            self._add("Funder-Konfiguration", "FEHLT",
+                      f"POLY_FUNDER_ADDRESS ist {self.funder}, abgeleitet ist "
+                      f"aber {self.deposit_wallet} — Wert korrigieren")
+        else:
+            self._add("Funder-Konfiguration", "OK",
+                      "POLY_FUNDER_ADDRESS == abgeleitete Deposit-Wallet-Adresse")
+
+    def _dw_code_present(self) -> bool:
+        try:
+            return len(self.w3.eth.get_code(self.deposit_wallet) or b"") > 0
+        except Exception as e:  # noqa: BLE001 — ohne Code-Check kein Deploy-Status
+            raise PreflightError(
+                f"Deposit-Wallet-Code nicht lesbar ({self.deposit_wallet}): {e}"
+            ) from e
+
+    def _step_deposit_deploy(self) -> None:
+        """Deployment prüfen; fehlt es: gasless WALLET-CREATE über den Relayer."""
+        name = "Deposit-Wallet-Deployment"
+        self.dw_deployed = self._dw_code_present()
+        if self.dw_deployed:
+            self._add(name, "OK", "Wallet-Code liegt on-chain")
+            return
+        if not self.relayer_api_key:
+            self._add(name, "FEHLT",
+                      "Wallet nicht deployt und POLY_RELAYER_API_KEY fehlt — "
+                      "Key mit diesem Wallet unter "
+                      "polymarket.com/settings?tab=api-keys erzeugen "
+                      "(CLOB-API-Creds gelten beim Relayer nicht)")
+            return
+        if not self.execute:
+            self._add(name, "PLAN",
+                      "WALLET-CREATE über den Polymarket-Relayer (gasless, "
+                      "deterministische CREATE2-Adresse, keine User-Signatur)")
+            return
+        try:
+            relayer = self._relayer()
+            txid = relayer.submit_wallet_create()
+            info = relayer.wait(txid)
+        except DepositWalletError as e:
+            raise PreflightError(f"{name}: {e}") from e
+        if not self._dw_code_present():
+            raise PreflightError(
+                f"{name}: Relayer meldet Erfolg, aber an {self.deposit_wallet} "
+                "liegt kein Code — nicht weitermachen")
+        self.dw_deployed = True
+        self._add(name, "AUSGEFÜHRT", "WALLET-CREATE über Relayer bestätigt",
+                  tx=str(info.get("transactionHash") or ""))
+
+    def _dw_approval_targets(self) -> list[tuple[str, object, str, tuple]]:
+        """Nötige Freigaben AUS dem Deposit Wallet: (Label, Contract, Fn, Args)."""
+        from web3 import Web3
+
+        cs = Web3.to_checksum_address
+        exchanges = (("CTF Exchange V2", cs(CTF_EXCHANGE_V2_ADDRESS)),
+                     ("NegRisk Exchange V2", cs(NEG_RISK_CTF_EXCHANGE_V2_ADDRESS)))
+        targets: list[tuple[str, object, str, tuple]] = []
+        for label, spender in exchanges:
+            targets.append((f"pUSD->{label}", self.pusd, "approve",
+                            (spender, MAX_UINT256)))
+        for label, operator in exchanges + (
+                ("NegRisk Adapter", cs(NEG_RISK_ADAPTER_ADDRESS)),):
+            targets.append((f"CTF->{label}", self.ctf, "setApprovalForAll",
+                            (operator, True)))
+        return targets
+
+    def _dw_missing_approvals(self) -> list[tuple[str, object, str, tuple]]:
+        """Fehlende Deposit-Wallet-Freigaben on-chain ermitteln (nur lesen)."""
+        missing = []
+        for label, contract, fn, args in self._dw_approval_targets():
+            try:
+                if fn == "approve":
+                    current = int(contract.functions.allowance(
+                        self.deposit_wallet, args[0]).call())
+                    ok = current >= UNLIMITED_ALLOWANCE_THRESHOLD
+                else:
+                    ok = bool(contract.functions.isApprovedForAll(
+                        self.deposit_wallet, args[0]).call())
+            except Exception as e:  # noqa: BLE001
+                raise PreflightError(
+                    f"Deposit-Wallet-Freigabe {label} nicht prüfbar: {e}") from e
+            if not ok:
+                missing.append((label, contract, fn, args))
+        return missing
+
+    def _step_deposit_approvals(self) -> None:
+        """Freigaben aus dem Deposit Wallet — als signierter Relayer-Batch."""
+        name = "Deposit-Wallet-Approvals"
+        missing = self._dw_missing_approvals()
+        if not missing:
+            self._add(name, "OK", "alle Freigaben bereits gesetzt")
+            return
+        labels = ", ".join(label for label, *_ in missing)
+        if not self.execute:
+            self._add(name, "PLAN",
+                      f"{len(missing)} Freigaben als EIP-712-Batch über den "
+                      f"Relayer setzen: {labels}")
+            return
+        if not self.dw_deployed or not self.relayer_api_key:
+            # Ohne Wallet/Key kann der Batch nicht raus; der Deploy-Schritt
+            # hat die konkrete Anweisung bereits als FEHLT gemeldet.
+            self._add(name, "FEHLT",
+                      f"{len(missing)} Freigaben offen ({labels}) — erst "
+                      "Deployment/POLY_RELAYER_API_KEY klären")
+            return
+        calls = []
+        for label, contract, fn, args in missing:
+            data = contract.encode_abi(fn, args=list(args))
+            # Simulation aus Wallet-Sicht: eth_call mit from=DepositWallet
+            # beweist, dass die Call-Data am Ziel-Contract nicht revertet.
+            try:
+                self.w3.eth.call({"to": contract.address,
+                                  "from": self.deposit_wallet, "data": data})
+            except Exception as e:  # noqa: BLE001
+                raise PreflightError(
+                    f"{name}: Simulation {label} revertet: {e}") from e
+            calls.append({"target": contract.address, "value": 0, "data": data})
+        try:
+            relayer = self._relayer()
+            nonce = relayer.get_nonce("WALLET")
+            deadline = int(time.time()) + self.BATCH_DEADLINE_S
+            signature = sign_wallet_batch(self.account, POLYGON_CHAIN_ID,
+                                          self.deposit_wallet, nonce, deadline,
+                                          calls)
+            txid = relayer.submit_wallet_batch(self.deposit_wallet, nonce,
+                                               deadline, calls, signature)
+            info = relayer.wait(txid)
+        except DepositWalletError as e:
+            raise PreflightError(f"{name}: {e}") from e
+        still = self._dw_missing_approvals()
+        if still:
+            raise PreflightError(
+                f"{name}: Batch bestätigt, aber Freigaben fehlen weiterhin: "
+                + ", ".join(label for label, *_ in still))
+        self._add(name, "AUSGEFÜHRT", f"Batch gesetzt: {labels}",
+                  tx=str(info.get("transactionHash") or ""))
+
+    def _step_deposit_funding(self) -> None:
+        """pUSD vom EOA in das Deposit Wallet transferieren (Buying-Power)."""
+        name = "pUSD->Deposit-Wallet"
+        try:
+            amount = int(self.pusd.functions.balanceOf(
+                self.account.address).call())
+        except Exception as e:  # noqa: BLE001
+            raise PreflightError(f"{name}: EOA-pUSD nicht lesbar: {e}") from e
+        if amount < MIN_FUNDING_UNITS:
+            self._add(name, "OK", "kein pUSD auf dem EOA — Transfer entfällt")
+            return
+        if not self.execute:
+            self._add(name, "PLAN",
+                      f"{_fmt(amount)} pUSD per ERC20-Transfer an "
+                      f"{self.deposit_wallet} (EOA-pUSD zählt nicht als "
+                      "Buying-Power des Deposit Wallets)")
+            return
+        if not self.dw_deployed:
+            self._add(name, "FEHLT",
+                      f"{_fmt(amount)} pUSD warten auf das Deployment — erst "
+                      "Deposit Wallet anlegen, dann transferieren")
+            return
+        # Simulation vor dem Senden: der Transfer darf nicht reverten.
+        try:
+            data = self.pusd.encode_abi("transfer",
+                                        args=[self.deposit_wallet, amount])
+            self.w3.eth.call({"to": self.pusd.address,
+                              "from": self.account.address, "data": data})
+        except Exception as e:  # noqa: BLE001
+            raise PreflightError(f"{name}: Transfer-Simulation revertet: {e}") from e
+        tx = self._send(self.pusd.functions.transfer(self.deposit_wallet, amount),
+                        name)
+        try:
+            dw_balance = int(self.pusd.functions.balanceOf(
+                self.deposit_wallet).call())
+        except Exception:  # noqa: BLE001 — reine Anzeige, Receipt war schon ok
+            dw_balance = None
+        self._add(name, "AUSGEFÜHRT",
+                  f"{_fmt(amount)} pUSD transferiert — Deposit Wallet hält "
+                  f"jetzt {_fmt(dw_balance)}", tx=tx)
+
+    # ---- Stufe 7: CLOB-Anbindung ----------------------------------------------------
 
     def _step_clob(self) -> None:
         name = "CLOB-Anbindung"
         if not self.execute:
             self._add(name, "PLAN",
-                      "create_or_derive_api_key + Adress-Abgleich laufen bei "
-                      "--execute (legt serverseitig API-Credentials an)")
+                      "create_or_derive_api_key + Adress-Abgleich + Balance-Sync "
+                      "(signature_type=3) laufen bei --execute")
             return
         try:
             if self._clob_factory is not None:
@@ -564,8 +806,12 @@ class Preflight:
             else:
                 from py_clob_client_v2.client import ClobClient
 
+                # Deposit-Wallet-Flow: maker/funder ist das Deposit Wallet,
+                # signiert wird mit dem EOA-Key (POLY_1271, signature_type 3).
                 client = ClobClient(CLOB_HOST, key=self.private_key,
-                                    chain_id=POLYGON_CHAIN_ID)
+                                    chain_id=POLYGON_CHAIN_ID,
+                                    signature_type=3,
+                                    funder=self.deposit_wallet)
             client.set_api_creds(client.create_or_derive_api_key())
             clob_addr = client.get_address()
         except Exception as e:  # noqa: BLE001
@@ -574,7 +820,21 @@ class Preflight:
             raise PreflightError(
                 f"{name}: CLOB meldet Adresse {clob_addr}, erwartet "
                 f"{self.account.address} — falscher Key/Signatur-Typ?")
-        self._add(name, "OK", f"API-Key abgeleitet, Adresse {clob_addr}")
+        # Balance-Sync: nach Einzahlung/Freigaben muss der CLOB seinen
+        # Collateral-Cache für das Deposit Wallet aktualisieren (docs:
+        # /balance-allowance/update mit signature_type=3).
+        sync = ""
+        try:
+            from py_clob_client_v2.clob_types import (AssetType,
+                                                      BalanceAllowanceParams)
+
+            client.update_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
+            sync = ", Balance-Sync ok"
+        except Exception as e:  # noqa: BLE001 — Sync ist nachholbar, kein Abbruch
+            log.warning("Balance-Sync (signature_type=3) fehlgeschlagen: %s", e)
+            sync = ", Balance-Sync fehlgeschlagen (beim ersten Trade nachholen)"
+        self._add(name, "OK", f"API-Key abgeleitet, Adresse {clob_addr}{sync}")
 
     # ---- Interna ---------------------------------------------------------------------
 
@@ -652,9 +912,10 @@ def cmd_preflight(cfg: BotConfig, execute: bool = False) -> list[StepResult]:
 
     Der Signatur-Typ wird bewusst roh aus der Umgebung gelesen (nicht über
     cfg.signature_type, dessen Default 2 ist): die Go-Live-Checkliste soll
-    ein EXPLIZIT gesetztes POLY_SIGNATURE_TYPE=0 einfordern.
+    ein EXPLIZIT gesetztes POLY_SIGNATURE_TYPE=3 (Deposit-Wallet-Flow)
+    einfordern.
     """
-    console.print("[bold]Preflight (EOA-Go-Live)[/bold] — "
+    console.print("[bold]Preflight (Go-Live, Deposit-Wallet-Flow)[/bold] — "
                   + ("[red]EXECUTE: Transaktionen werden gesendet[/red]"
                      if execute else
                      "[green]Plan-Modus: es wird nichts gesendet[/green]"))
