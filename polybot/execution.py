@@ -1195,13 +1195,25 @@ class LiveBroker(Broker):
                 reason=f"Unwind {group}", market_question=f"Unwind {group}",
             )
             outcome, _fill = self._submit_signal(counter, OrderType.FAK, portfolio, fee_rates)
-            if outcome == "matched":
+            unwound = _fill.size if _fill is not None else 0.0
+            if outcome == "matched" and unwound >= f.size - 1e-9:
                 fills += 1
                 log.warning("Gruppe %s: Bein %s glattgestellt (%s %.2f @%.4f)",
                             group, f.token_id[:12], counter.side, f.size, level.price)
+            elif outcome == "matched":
+                # FAK füllt, was geht, und cancelt den Rest — eine
+                # Teilfüllung liess das Rest-Bein bisher STILL ungehedgt
+                # (Verifikations-Befund 30). Der Waisen-Detektor stellt den
+                # Rest nach der Schonfrist glatt; hier laut machen.
+                fills += 1
+                log.error("Gruppe %s: Unwind für %s nur TEILWEISE gefüllt "
+                          "(%.2f von %.2f) — Rest ungehedgt, Waisen-Detektor "
+                          "übernimmt nach Schonfrist", group, f.token_id[:12],
+                          unwound, f.size)
             else:
-                log.error("Gruppe %s: Unwind für %s nicht gefüllt — Position offen, "
-                          "manuell glattstellen!", group, f.token_id[:12])
+                log.error("Gruppe %s: Unwind für %s nicht gefüllt — Position "
+                          "offen; Waisen-Detektor übernimmt nach Schonfrist, "
+                          "sonst manuell glattstellen!", group, f.token_id[:12])
         return fills
 
     @staticmethod

@@ -233,3 +233,40 @@ Messungen, geschönter Simulation oder überlebenden Orders. Umsetzung
 4. **Order-Sicherheit** (`polybot/execution.py`): `cancel_all` beim
    Prozessstart (Alt-Orders eines Vorgängers) und in `cmd_run finally`
    (Kill-Switch, Ctrl-C, Crash) — kein Zustand «Bot tot, Orders leben».
+
+---
+
+## Verifikations-Runde 2 (05.07.2026 spät): 42 bestätigte Befunde, 30 behoben
+
+Die adversariale Flotte (53 Agenten: 9 Angreifer auf die Fixes + System-
+Sweeps, je Befund ein Gegen-Verifikator) bestätigte 42 von 44 Befunden —
+darunter einen KRITISCHEN: Der Gamma-Token-Lookup (Fundament von
+Settlement-Sweeper UND Waisen-Detektor) war live tot (HTTP 422 ab 2 Tokens;
+Tests grün, weil gefakt). Ohne die Verifikation wäre der Deadlock-Fix ein
+Placebo gewesen — «Wenn ein Fix einer adversarialen Prüfung nicht
+standhält, ist es kein Fix» hat sich am ersten Tag bezahlt gemacht.
+
+Behoben (5 Commits): Gamma-Listen-Format+Chunking+limit (kritisch);
+Settled-Registry gegen Doppel-Settlement nach Neustart; Sync-Guards
+(sizeThreshold, Fill-Schonfrist gegen API-Lag, Leerantwort-Adress-Guard,
+day_start-Rebase für den Kill-Switch, periodischer Re-Sync); Shadow-
+Symmetrie (paper=Episodensumme dedupliziert), Stray-Fill-Zuordnung und
+Aggregations-Reinheit; finaler Reconcile vor/nach cancel_all; forcierte
+Buchung börsenbestätigter Fills; Tracking überlebender Delayed-Orders;
+Init-Cancel-Retry; GC-Schutz vor synthetischen Büchern; SIGTERM-Handler;
+Doppelstart-Lock; Snapshot-Altersdeckel; Ledger-Trennung paper/live;
+cmd_status nach Modus; Recorder-Archiv-Rotation; Breach-Tick im Ledger;
+Unwind-Teilfüllungs-Warnung.
+
+### Bewusst akzeptierte Restlücken (dokumentiert, nicht vergessen)
+
+- Kill-Switch bewertet marklose Positionen zu Einstandskosten (gedrosselt
+  gewarnt); das Settlement verkürzt das Fenster, schliesst es nicht.
+- PaperBroker-Liquiditätsverbrauch ist in-memory — jeder Neustart öffnet
+  ein kurzes Inflations-Fenster (eine Buch-Generation).
+- Paper-Latenzverzug zählt execute()-Aufrufe statt Ticks (Flattener-
+  Zweitaufruf halbiert ihn); Flattener ist im Paper-Messbetrieb aus.
+- Live-Cash wird nicht mit der Chain synchronisiert (Börsen-Balance-Check
+  fängt Überzeichnung); Batch-Redeem für das Deposit-Wallet ist der
+  nächste Ausbau, wenn die Capture-Messung läuft.
+- Kein Heartbeat-Alerting — Betriebsüberwachung bleibt manuell (Log).
