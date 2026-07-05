@@ -285,3 +285,35 @@ def test_inplay_delayed_nur_nach_spielbeginn_und_mit_delay():
                       game_start_ts=start).inplay_delayed(now=start + 60)
     assert not Market(**kw, seconds_delay=5,
                       game_start_ts=None).inplay_delayed(now=start + 60)
+
+
+# ---- Token-Lookup für Altbestände (Waisen-Detektor) ------------------------
+
+def test_markets_by_tokens_fragt_offen_und_geschlossen_ab():
+    """Live-Befund: ohne closed=true liefert der Lookup nur offene Märkte."""
+    from polybot.data.gamma import GammaClient
+
+    calls = []
+
+    class FakeGamma(GammaClient):
+        def _get(self, path, **params):
+            calls.append(params)
+            if params.get("closed") == "true":
+                return [{"conditionId": "0xc", "question": "Zu?", "slug": "zu",
+                         "clobTokenIds": '["t1", "t2"]', "closed": True,
+                         "negRisk": False}]
+            return []
+
+    ms = FakeGamma().markets_by_tokens(["t1"])
+    assert [c.get("closed") for c in calls] == [None, "true"]
+    assert len(ms) == 1 and ms[0].closed and ms[0].yes_token == "t1"
+
+
+def test_markets_by_tokens_leere_liste_macht_keinen_request():
+    from polybot.data.gamma import GammaClient
+
+    class Boom(GammaClient):
+        def _get(self, path, **params):
+            raise AssertionError("kein Request erwartet")
+
+    assert Boom().markets_by_tokens([]) == []

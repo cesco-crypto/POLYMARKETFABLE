@@ -750,7 +750,7 @@ def cmd_run(cfg: BotConfig) -> None:
     # Schonfrist zum Bid glattstellen — der Bot hält keine Richtungswetten.
     flattener = None
     if cfg.risk.flatten_orphan_grace_s > 0:
-        flattener = OrphanFlattener(cfg, books=books)
+        flattener = OrphanFlattener(cfg, books=books, gamma=gamma)
         console.print(f"[green]Waisen-Detektor aktiv — Schonfrist "
                       f"{cfg.risk.flatten_orphan_grace_s:.0f}s.[/green]")
 

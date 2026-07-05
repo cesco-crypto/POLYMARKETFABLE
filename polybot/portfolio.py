@@ -14,6 +14,8 @@ log = logging.getLogger(__name__)
 # Fill-Historie: vollständiger Audit-Trail landet append-only in einer
 # JSONL-Datei; im RAM und im State-JSON werden nur die letzten N gehalten.
 MAX_FILLS_IN_STATE = 500
+# "Kein Mark"-Warnung höchstens alle so viele Sekunden je Token wiederholen.
+MARK_WARN_INTERVAL_S = 300.0
 
 
 def _utc_today() -> str:
@@ -76,6 +78,10 @@ class Portfolio:
     # Wie viele Einträge aus self.fills schon in die JSONL-Datei geschrieben
     # wurden (nicht persistiert, nur für save()).
     _fills_flushed: int = field(default=0, repr=False)
+    # Drossel für die "Kein Mark"-Warnung je Token (nicht persistiert):
+    # value() läuft im Stream-Betrieb mehrmals pro Sekunde — ohne Drossel
+    # flutet ein einziger markloser Altbestand das Log (Befund 05.07.2026).
+    _mark_warned: dict = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         if self.day_start_value is None:
@@ -213,9 +219,14 @@ class Portfolio:
                 v += p.shares * marks[p.token_id]
             else:
                 # Fehlender Mark (Book-Fetch gescheitert, Markt delistet):
-                # Fallback auf Einstandskosten schönt den Wert — laut warnen.
-                log.warning("Kein Mark für %s — bewerte zu Einstandskosten "
-                            "(%.2f USDC)", p.token_id[:16], p.cost_basis)
+                # Fallback auf Einstandskosten schönt den Wert — warnen,
+                # aber gedrosselt (max. alle MARK_WARN_INTERVAL_S je Token).
+                now = datetime.now(timezone.utc).timestamp()
+                if now - self._mark_warned.get(p.token_id, 0.0) \
+                        >= MARK_WARN_INTERVAL_S:
+                    self._mark_warned[p.token_id] = now
+                    log.warning("Kein Mark für %s — bewerte zu Einstandskosten "
+                                "(%.2f USDC)", p.token_id[:16], p.cost_basis)
                 v += p.cost_basis
         return v
 

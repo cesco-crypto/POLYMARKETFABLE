@@ -174,6 +174,33 @@ class GammaClient:
                 time.sleep(wait)
         raise AssertionError("unerreichbar")  # Schleife returned oder raist immer
 
+    def markets_by_tokens(self, token_ids: list[str]) -> list[Market]:
+        """Märkte zu CLOB-Token-IDs auflösen — auch bereits geschlossene.
+
+        Anwendungsfall Waisen-Detektor: Altbestände im Portfolio, deren
+        Märkte längst aus dem Scan gefallen sind (beendet, in-play
+        gefiltert). Live-Befund: /markets?clob_token_ids=… liefert ohne
+        closed-Parameter NUR offene Märkte — geschlossene brauchen einen
+        zweiten Abruf mit closed=true. Fehler werden geloggt und liefern
+        das bis dahin Gefundene (der Aufrufer versucht es später erneut).
+        """
+        ids = ",".join(str(t) for t in token_ids if t)
+        if not ids:
+            return []
+        out: dict[str, Market] = {}
+        for extra in ({}, {"closed": "true"}):
+            try:
+                rows = self._get("/markets", clob_token_ids=ids, **extra)
+            except requests.RequestException as e:
+                log.warning("Gamma-Token-Lookup fehlgeschlagen (%s): %s",
+                            extra or "offen", e)
+                continue
+            for row in rows or []:
+                m = _parse_market(row)
+                if m:
+                    out.setdefault(m.condition_id, m)
+        return list(out.values())
+
     def active_markets(self, min_liquidity: float = 0.0, limit: int = 500) -> list[Market]:
         """Aktive, offene Märkte, sortiert nach Liquidität."""
         # Offset-Pagination läuft über einen live nach liquidityNum sortierten

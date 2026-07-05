@@ -66,14 +66,19 @@ class OrphanFlattener:
     MIN_NOTIONAL_USDC = 1.0
     # Selbst geholte Top-of-Book-Bids so lange wiederverwenden.
     BID_TTL_S = 20.0
+    # Gescheiterte Gamma-Auflösungen unbekannter Tokens frühestens nach so
+    # vielen Sekunden erneut versuchen (Rate-Limit-Budget schonen).
+    RESOLVE_RETRY_S = 300.0
 
-    def __init__(self, cfg: BotConfig, books=None):
+    def __init__(self, cfg: BotConfig, books=None, gamma=None):
         self.grace_s = cfg.risk.flatten_orphan_grace_s
         self.books = books  # BookClient für Bids off-Snapshot (optional)
+        self.gamma = gamma  # GammaClient für Altbestände ohne Paar (optional)
         self.pairs: dict[str, _PairInfo] = {}
         self.first_seen: dict[str, float] = {}   # Token -> Beginn des Überhangs
         self.last_emit: dict[str, float] = {}    # Token -> letztes SELL-Signal
         self._bid_cache: dict[str, tuple[float, float | None]] = {}
+        self._resolve_tried: dict[str, float] = {}  # Token -> letzter Versuch
         self._warned: set[str] = set()           # einmalige Hinweise je Token
 
     # ---- Paar-Karte pflegen -------------------------------------------------
@@ -106,12 +111,13 @@ class OrphanFlattener:
         """
         now = time.time() if now is None else now
         self.observe(snap)
+        self._resolve_unknown(portfolio, now)
         candidates: list[tuple[str, _PairInfo, float]] = []
         for token, pos in list(portfolio.positions.items()):
             info = self.pairs.get(token)
             if info is None:
-                # Nie in einem Snapshot gesehen (z.B. Altbestand aus einem
-                # früheren Lauf): ohne Paar-Wissen nicht beurteilbar.
+                # Auch per Gamma-Lookup nicht auflösbar: ohne Paar-Wissen
+                # nicht beurteilbar — beobachten statt raten.
                 self._warn_once(token, "Waisen-Check: Token %s ohne bekanntes "
                                        "Paar — bleibt unangetastet", token[:16])
                 continue
@@ -176,6 +182,35 @@ class OrphanFlattener:
         return out, extra_books
 
     # ---- Interna -------------------------------------------------------------
+
+    def _resolve_unknown(self, portfolio, now: float) -> None:
+        """Bestands-Tokens ohne Paar-Wissen per Gamma-Token-Lookup auflösen.
+
+        Betrifft Altbestände aus früheren Läufen (z.B. Waisen von vor einem
+        Neustart): ihre Märkte sind aus dem Scan gefallen, die Paar-Karte
+        kennt sie nicht — Gamma kennt sie noch (auch geschlossene Märkte).
+        Gedrosselt über RESOLVE_RETRY_S je Token; crasht nie den Tick.
+        """
+        if self.gamma is None or not hasattr(self.gamma, "markets_by_tokens"):
+            return
+        unknown = [t for t in portfolio.positions
+                   if t not in self.pairs
+                   and now - self._resolve_tried.get(t, 0.0) > self.RESOLVE_RETRY_S]
+        if not unknown:
+            return
+        for t in unknown:
+            self._resolve_tried[t] = now
+        try:
+            markets = self.gamma.markets_by_tokens(unknown)
+        except Exception as e:  # noqa: BLE001 — Lookup nie tick-kritisch
+            log.warning("Waisen-Check: Gamma-Token-Lookup fehlgeschlagen: %s", e)
+            return
+        for m in markets:
+            self._learn(m)
+            log.info("Waisen-Check: Altbestand aufgelöst — %s gehört zu "
+                     "«%s» (closed=%s)",
+                     (m.yes_token if m.yes_token in unknown else m.no_token)[:16],
+                     m.question[:60], m.closed)
 
     def _snap_bid(self, snap: MarketSnapshot, token: str) -> float | None:
         book = snap.books.get(token)

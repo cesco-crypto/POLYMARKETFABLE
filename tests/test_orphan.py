@@ -202,3 +202,50 @@ def test_tick_stellt_waise_im_paper_broker_glatt():
                  broker=PaperBroker(c), portfolio=pf, flattener=fl)
     assert fills >= 1
     assert "yes1" not in pf.positions  # Bein verkauft, kein Bestand mehr
+
+
+def test_altbestand_wird_per_gamma_lookup_aufgeloest_und_verkauft():
+    """MacBook-Befund 05.07. abends: Positionen aus früheren Läufen, deren
+    Märkte aus dem Scan gefallen sind — der Detektor löst sie über den
+    Gamma-Token-Lookup auf und stellt sie glatt, sobald ein Bid da ist."""
+
+    class FakeGamma:
+        def __init__(self, markets):
+            self.markets = markets
+            self.calls: list[list[str]] = []
+
+        def markets_by_tokens(self, token_ids):
+            self.calls.append(list(token_ids))
+            return self.markets
+
+    class FakeBooks:
+        def get_top_prices(self, token_ids):
+            return {t: (0.31, 0.33) for t in token_ids}
+
+    m = market(1)
+    gamma = FakeGamma([m])
+    fl = OrphanFlattener(cfg(grace=0), books=FakeBooks(), gamma=gamma)
+    pf = portfolio_with(buy("yes1", 20))     # Altbestand, nie im Snapshot
+    sigs, _ = fl.signals(snap_of(), pf, now=T0 + 1)
+    assert gamma.calls == [["yes1"]]
+    assert len(sigs) == 1 and sigs[0].token_id == "yes1"
+    assert sigs[0].price == pytest.approx(0.31)
+
+
+def test_gamma_lookup_wird_gedrosselt():
+    class FailingGamma:
+        def __init__(self):
+            self.calls = 0
+
+        def markets_by_tokens(self, token_ids):
+            self.calls += 1
+            return []                        # Gamma kennt den Token nicht
+
+    gamma = FailingGamma()
+    fl = OrphanFlattener(cfg(grace=0), gamma=gamma)
+    pf = portfolio_with(buy("fremd", 10))
+    fl.signals(snap_of(), pf, now=T0)
+    fl.signals(snap_of(), pf, now=T0 + 1)    # innerhalb der Drossel
+    assert gamma.calls == 1
+    fl.signals(snap_of(), pf, now=T0 + fl.RESOLVE_RETRY_S + 1)
+    assert gamma.calls == 2
