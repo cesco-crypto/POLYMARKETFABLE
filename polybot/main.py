@@ -5,18 +5,23 @@
   python -m polybot.main run --config config.yaml
   python -m polybot.main status          # Paper-Portfolio anzeigen
   python -m polybot.main report          # Opportunity-Log auswerten (--target)
+  python -m polybot.main cycle-report    # kompakte Zyklus-Selbstauswertung
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import time
+from pathlib import Path
 
 from rich.console import Console
 from rich.table import Table
 
+from polybot import cycle_report
 from polybot.config import BotConfig
+from polybot.cycle_report import CycleLedger
 from polybot.data.fees import FeeRateCache
 from polybot.data.gamma import GammaClient, Market
 from polybot.data.orderbook import BookClient, Level, OrderBook
@@ -216,26 +221,44 @@ def build_snapshot(cfg: BotConfig, gamma: GammaClient, books: BookClient,
                           events=events, fee_rates=fees.rates_for(token_ids))
 
 
-def merge_positions(snap: MarketSnapshot, portfolio: Portfolio) -> float:
+def merge_positions(snap: MarketSnapshot, portfolio: Portfolio,
+                    ledger: CycleLedger | None = None) -> float:
     """Komplement-Paare und vollständige NegRisk-Sets zu USDC mergen.
 
     Paper-Pendant zum on-chain CTF-Merge: Arbitragegewinne werden sofort
     realisiert statt bis zur Auflösung im Portfolio zu liegen. Rückgabe:
-    Anzahl gemergter Paare/Sets (für Logging/Tests).
+    Anzahl gemergter Paare/Sets (für Logging/Tests). Mit `ledger` wird jeder
+    Merge samt Markt-Label und realisiertem PnL (Delta von realized_pnl über
+    den Merge) protokolliert — Basis für den Cycle-Report.
     """
     merged = 0.0
+
+    def do_merge(market: str, kind: str, fn) -> None:
+        nonlocal merged
+        before = portfolio.realized_pnl
+        sets = fn()
+        if sets > 0 and ledger is not None:
+            ledger.record_merge(market, kind, sets,
+                                portfolio.realized_pnl - before)
+        merged += sets
+
     for m in snap.markets:
-        merged += portfolio.merge_pairs(m.yes_token, m.no_token)
-    for ev_markets in snap.negrisk_events.values():
-        merged += portfolio.merge_negrisk_yes([m.yes_token for m in ev_markets])
-        merged += portfolio.merge_negrisk_no([m.no_token for m in ev_markets],
-                                             len(ev_markets))
+        do_merge(m.question, "complement",
+                 lambda m=m: portfolio.merge_pairs(m.yes_token, m.no_token))
+    for slug, ev_markets in snap.negrisk_events.items():
+        do_merge(slug, "negrisk_yes",
+                 lambda ev=ev_markets: portfolio.merge_negrisk_yes(
+                     [m.yes_token for m in ev]))
+        do_merge(slug, "negrisk_no",
+                 lambda ev=ev_markets: portfolio.merge_negrisk_no(
+                     [m.no_token for m in ev], len(ev)))
     return merged
 
 
 def tick(cfg: BotConfig, snap: MarketSnapshot, strategies, risk: RiskManager,
          broker, portfolio: Portfolio,
-         recorder: OpportunityRecorder | None = None) -> int:
+         recorder: OpportunityRecorder | None = None,
+         ledger: CycleLedger | None = None) -> int:
     snap.portfolio = portfolio  # Inventar-Sicht für Strategien (Market Making)
     # Marks (Midpoints) für den Kill-Switch: ohne sie wären unrealisierte
     # Verluste unsichtbar. Prüfung VOR der Ausführung, damit im Breach-Tick
@@ -256,8 +279,11 @@ def tick(cfg: BotConfig, snap: MarketSnapshot, strategies, risk: RiskManager,
     if cfg.mode != "live":
         # Paper-Modus: frisch gefüllte Arb-Paare/Sets sofort zu USDC mergen —
         # live wäre das ein on-chain CTF-Merge und Sache des LiveBrokers.
-        merge_positions(snap, portfolio)
+        merge_positions(snap, portfolio, ledger)
     risk.check_daily_loss(portfolio, marks)
+    if ledger is not None:
+        # PnL-Ledger für den Cycle-Report (dedupliziert, crasht nie den Tick).
+        ledger.record_tick(portfolio)
     return fills
 
 
@@ -292,7 +318,8 @@ def stream_tokens(snap: MarketSnapshot, cap: int) -> list[str]:
 def stream_loop(cfg: BotConfig, snap: MarketSnapshot, strategies,
                 risk: RiskManager, broker, portfolio: Portfolio,
                 streamer, deadline: float,
-                recorder: OpportunityRecorder | None = None) -> int:
+                recorder: OpportunityRecorder | None = None,
+                ledger: CycleLedger | None = None) -> int:
     """Schneller Inner-Loop zwischen zwei REST-Snapshots.
 
     Prüft alle stream_tick_s NUR die live gestreamten Bücher (über die
@@ -319,7 +346,8 @@ def stream_loop(cfg: BotConfig, snap: MarketSnapshot, strategies,
                               events=snap.events,
                               fee_rates=snap.fee_rates)
         try:
-            got = tick(cfg, fast, strategies, risk, broker, portfolio, recorder)
+            got = tick(cfg, fast, strategies, risk, broker, portfolio, recorder,
+                       ledger)
         except KillSwitch:
             raise
         except Exception as e:  # noqa: BLE001 — Netzwerk/Broker-Fehler überleben
@@ -385,6 +413,11 @@ def cmd_run(cfg: BotConfig) -> None:
     # Beweisdaten-Sammler: protokolliert JEDE beobachtete (Fast-)Arbitrage
     # nach data/opportunities.jsonl — Auswertung: python -m polybot.main report
     recorder = OpportunityRecorder(cfg)
+    # PnL-Ledger (prozessübergreifend, data/pnl_ledger.jsonl): Basis für
+    # `python -m polybot.main cycle-report` — der Messbot startet den Prozess
+    # alle 90 Minuten frisch, die Fenster-Metriken brauchen deshalb Disk-State.
+    ledger = CycleLedger()
+    ledger.record_start(portfolio)
 
     # WebSocket-Streaming (optional): scheitert der Start (z.B. fehlende
     # Bibliothek), läuft der Bot unverändert im reinen REST-Betrieb weiter.
@@ -410,7 +443,7 @@ def cmd_run(cfg: BotConfig) -> None:
                     # reine Zustandsänderung, wirft nicht.
                     streamer.subscribe(stream_tokens(snap, cfg.strategy.stream_max_tokens))
                 fills = tick(cfg, snap, strategies, risk, broker, portfolio,
-                             recorder)
+                             recorder, ledger)
                 marks = {t: b.midpoint for t, b in snap.books.items() if b.midpoint}
                 console.print(
                     f"[dim]{time.strftime('%H:%M:%S')}[/dim] "
@@ -436,7 +469,7 @@ def cmd_run(cfg: BotConfig) -> None:
                 # bei leerem/totem Stream kehrt der Loop sofort zurück.
                 try:
                     stream_loop(cfg, snap, strategies, risk, broker,
-                                portfolio, streamer, deadline, recorder)
+                                portfolio, streamer, deadline, recorder, ledger)
                 except KillSwitch as e:
                     console.print(f"[bold red]{e}[/bold red]")
                     portfolio.save()
