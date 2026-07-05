@@ -338,3 +338,36 @@ def test_cmd_report_ohne_daten_bricht_freundlich_ab(tmp_path, capsys):
     main.cmd_report(BotConfig(), opps_path=str(tmp_path / "fehlt.jsonl"),
                     state_path=str(tmp_path / "fehlt.json"))
     assert "Keine Beobachtungen" in capsys.readouterr().out
+
+
+# ---- Größendeckel (Platte-voll-Befund 05.07.2026) ---------------------------
+
+def test_rotation_kuerzt_zu_grosse_datei_an_zeilengrenze(tmp_path):
+    from polybot.config import BotConfig
+    from polybot.recorder import OpportunityRecorder
+
+    p = tmp_path / "opps.jsonl"
+    rec = OpportunityRecorder(BotConfig(), path=p)
+    rec.MAX_BYTES = 10_000
+    rec.CHECK_EVERY = 1
+    lines = [json.dumps({"i": i, "pad": "x" * 80}) for i in range(200)]
+    p.write_text("\n".join(lines) + "\n")
+    assert p.stat().st_size > rec.MAX_BYTES
+    rec._maybe_rotate()
+    assert p.stat().st_size <= rec.MAX_BYTES // 2 + 100
+    kept = p.read_text().splitlines()
+    assert all(json.loads(l) for l in kept)          # nur ganze Zeilen
+    assert json.loads(kept[-1])["i"] == 199          # jüngste Daten überleben
+
+
+def test_rotation_laesst_kleine_datei_in_ruhe(tmp_path):
+    from polybot.config import BotConfig
+    from polybot.recorder import OpportunityRecorder
+
+    p = tmp_path / "opps.jsonl"
+    rec = OpportunityRecorder(BotConfig(), path=p)
+    rec.CHECK_EVERY = 1
+    p.write_text('{"a": 1}\n')
+    before = p.read_text()
+    rec._maybe_rotate()
+    assert p.read_text() == before

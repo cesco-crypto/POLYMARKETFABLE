@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -174,12 +175,23 @@ def find_opportunities(cfg: BotConfig, snap: MarketSnapshot,
 
 
 class OpportunityRecorder:
-    """Hängt sich an tick() und schreibt Gelegenheiten append-only als JSONL."""
+    """Hängt sich an tick() und schreibt Gelegenheiten append-only als JSONL.
+
+    Größendeckel (Befund 05.07.2026): Bei 0.5s-Stream-Ticks wuchs die Datei
+    auf 13+ GB und füllte die Platte — was dann ALLES mitriss (Messbot,
+    Logs, parallele Analysen). Überschreitet die Datei MAX_BYTES, wird sie
+    rotiert: die jüngste Hälfte bleibt (an einer Zeilengrenze), der Rest
+    fällt weg. Erkenntnisse aus alten Daten gehören ohnehin nach REPORT.md.
+    """
+
+    MAX_BYTES = 1_000_000_000  # 1 GB ≈ mehrere Tage Messfenster
+    CHECK_EVERY = 1000         # Größe nicht bei jedem observe() prüfen
 
     def __init__(self, cfg: BotConfig, path: str | Path = DEFAULT_PATH):
         self.cfg = cfg
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._writes_since_check = 0
 
     def observe(self, snap: MarketSnapshot, ts: float | None = None) -> list[Opportunity]:
         """Snapshot auswerten und Gelegenheiten protokollieren.
@@ -189,12 +201,37 @@ class OpportunityRecorder:
         opps = find_opportunities(self.cfg, snap, ts=ts)
         if opps:
             try:
+                self._maybe_rotate()
                 with self.path.open("a") as fh:
                     for o in opps:
                         fh.write(json.dumps(asdict(o)) + "\n")
             except OSError as e:
                 log.warning("Opportunity-Log %s nicht schreibbar: %s", self.path, e)
         return opps
+
+    def _maybe_rotate(self) -> None:
+        """Datei über MAX_BYTES auf die jüngste Hälfte kürzen (Zeilengrenze)."""
+        self._writes_since_check += 1
+        if self._writes_since_check < self.CHECK_EVERY:
+            return
+        self._writes_since_check = 0
+        try:
+            size = self.path.stat().st_size
+        except OSError:
+            return
+        if size <= self.MAX_BYTES:
+            return
+        keep = self.MAX_BYTES // 2
+        tmp = self.path.with_suffix(".rotate")
+        with self.path.open("rb") as src:
+            src.seek(size - keep)
+            src.readline()  # angerissene Zeile verwerfen
+            with tmp.open("wb") as dst:
+                while chunk := src.read(1 << 20):
+                    dst.write(chunk)
+        os.replace(tmp, self.path)
+        log.warning("Opportunity-Log rotiert: %.1f GB -> %.2f GB (Deckel %.1f GB)",
+                    size / 1e9, keep / 1e9, self.MAX_BYTES / 1e9)
 
 
 # ---- Report-Aggregation (python -m polybot.main report) --------------------
