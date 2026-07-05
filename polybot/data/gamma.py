@@ -55,6 +55,33 @@ class Market:
     # Unix-Timestamp (None = kein Spiel-Markt).
     seconds_delay: float = 0.0
     game_start_ts: float | None = None
+    # Auflösung: umaResolutionStatus ('resolved' = final) und outcomePrices
+    # (ausgerichtet auf [yes_token, no_token]; final exakt 0/1, während des
+    # Handels Zwischenwerte). Quelle für das Settlement (polybot/settlement.py).
+    uma_resolution_status: str = ""
+    outcome_prices: tuple[float, float] | None = None
+
+    def resolved_payouts(self) -> tuple[float, float] | None:
+        """Finale Auszahlung pro Share (YES, NO) — oder None, wenn nicht final.
+
+        Final heisst: Markt geschlossen, UMA-Status 'resolved' und
+        outcomePrices eindeutig 0/1 (Zwischenstände wie '0.0025' sind
+        Handelspreise, keine Auszahlung — dann None).
+        """
+        if not self.closed or self.uma_resolution_status != "resolved" \
+                or self.outcome_prices is None:
+            return None
+        out = []
+        for p in self.outcome_prices:
+            if p >= 0.999:
+                out.append(1.0)
+            elif p <= 0.001:
+                out.append(0.0)
+            else:
+                return None  # kein eindeutiger Gewinner (z.B. 50/50-Split)
+        if sum(out) != 1.0:
+            return None  # Binärmarkt zahlt genau 1 USDC pro Paar aus
+        return out[0], out[1]
 
     def tradeable(self, min_time_to_end_s: float, now: float | None = None) -> bool:
         """Bleibt bis zum Marktende genug Zeit, um real zu handeln?"""
@@ -120,6 +147,17 @@ def _parse_end_ts(m: dict) -> float | None:
     return _parse_ts(m.get("endDate") or m.get("endDateIso"))
 
 
+def _parse_outcome_prices(m: dict) -> tuple[float, float] | None:
+    """outcomePrices ('["1", "0"]', ausgerichtet auf clobTokenIds) parsen."""
+    try:
+        prices = json.loads(m.get("outcomePrices") or "[]")
+        if len(prices) != 2:
+            return None
+        return float(prices[0]), float(prices[1])
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
 def _parse_market(m: dict) -> Market | None:
     try:
         token_ids = json.loads(m.get("clobTokenIds") or "[]")
@@ -141,6 +179,8 @@ def _parse_market(m: dict) -> Market | None:
             end_ts=_parse_end_ts(m),
             seconds_delay=float(m.get("secondsDelay") or 0),
             game_start_ts=_parse_ts(m.get("gameStartTime")),
+            uma_resolution_status=str(m.get("umaResolutionStatus") or ""),
+            outcome_prices=_parse_outcome_prices(m),
         )
     except (ValueError, TypeError, json.JSONDecodeError):
         return None

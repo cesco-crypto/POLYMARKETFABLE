@@ -33,6 +33,7 @@ from polybot.data.stream import BookStreamer
 from polybot.execution import make_broker
 from polybot.orphan import OrphanFlattener
 from polybot.portfolio import Portfolio
+from polybot.settlement import SettlementSweeper
 from polybot.preflight import cmd_preflight
 from polybot.recorder import (OpportunityRecorder, aggregate,
                               load_opportunities, required_capital)
@@ -392,7 +393,8 @@ def tick(cfg: BotConfig, snap: MarketSnapshot, strategies, risk: RiskManager,
          recorder: OpportunityRecorder | None = None,
          ledger: CycleLedger | None = None,
          shadow: ShadowTracker | None = None,
-         flattener: OrphanFlattener | None = None) -> int:
+         flattener: OrphanFlattener | None = None,
+         sweeper: SettlementSweeper | None = None) -> int:
     snap.portfolio = portfolio  # Inventar-Sicht für Strategien (Market Making)
     # Marks (Midpoints) für den Kill-Switch: ohne sie wären unrealisierte
     # Verluste unsichtbar. Prüfung VOR der Ausführung, damit im Breach-Tick
@@ -432,6 +434,16 @@ def tick(cfg: BotConfig, snap: MarketSnapshot, strategies, risk: RiskManager,
         merger = getattr(broker, "merger", None)
         if merger is not None:
             live_merge_positions(snap, portfolio, merger, ledger)
+    if sweeper is not None:
+        # Resolution-Sweeper (Kapital-Deadlock-Fix): Positionen final
+        # aufgelöster Märkte zur Auszahlung ausbuchen — sonst wächst das
+        # Exposure monoton und der Risk-Manager blockt dauerhaft.
+        # NACH den Merges (was mergebar ist, ist billiger recycelt) und
+        # VOR dem Waisen-Detektor (aufgelöste Beine sind kein Waisen-Fall).
+        try:
+            sweeper.sweep(portfolio, ledger)
+        except Exception as e:  # noqa: BLE001 — Settlement nie tick-kritisch
+            log.error("Settlement-Sweep fehlgeschlagen: %s", e)
     if flattener is not None:
         # Waisen-Detektor: NACH den Merges (vollständige Paare sind dann weg)
         # ungehedgte Einzelbeine zum Bid glattstellen. Die SELLs reduzieren
@@ -619,7 +631,8 @@ def stream_loop(cfg: BotConfig, worker: SnapshotWorker, strategies,
                 ledger: CycleLedger | None = None,
                 shadow: ShadowTracker | None = None,
                 state_path: str = "paper_state.json",
-                flattener: OrphanFlattener | None = None) -> None:
+                flattener: OrphanFlattener | None = None,
+                sweeper: SettlementSweeper | None = None) -> None:
     """Endloser Inner-Loop gegen den Doppelpuffer des SnapshotWorkers.
 
     Läuft UNUNTERBROCHEN — der REST-Refresh passiert parallel im Worker,
@@ -661,7 +674,7 @@ def stream_loop(cfg: BotConfig, worker: SnapshotWorker, strategies,
             got = 0
             try:
                 got = tick(cfg, fast, strategies, risk, broker, portfolio,
-                           recorder, ledger, shadow, flattener)
+                           recorder, ledger, shadow, flattener, sweeper)
             except KillSwitch:
                 raise
             except Exception as e:  # noqa: BLE001 — Netzwerk/Broker-Fehler überleben
@@ -753,6 +766,10 @@ def cmd_run(cfg: BotConfig) -> None:
         flattener = OrphanFlattener(cfg, books=books, gamma=gamma)
         console.print(f"[green]Waisen-Detektor aktiv — Schonfrist "
                       f"{cfg.risk.flatten_orphan_grace_s:.0f}s.[/green]")
+    # Resolution-Sweeper (immer aktiv, paper wie live): bucht Positionen
+    # final aufgelöster Märkte zur Auszahlung aus — der Kapital-Deadlock-Fix
+    # der Agenten-Flotte vom 05.07.2026.
+    sweeper = SettlementSweeper(gamma)
 
     # WebSocket-Streaming (optional): scheitert der Start (z.B. fehlende
     # Bibliothek), läuft der Bot unverändert im reinen REST-Betrieb weiter.
@@ -776,7 +793,7 @@ def cmd_run(cfg: BotConfig) -> None:
     try:
         stream_loop(cfg, worker, strategies, risk, broker, portfolio,
                     streamer, recorder, ledger, shadow, state_path=state_path,
-                    flattener=flattener)
+                    flattener=flattener, sweeper=sweeper)
     except KillSwitch as e:
         console.print(f"[bold red]{e}[/bold red]")
     except KeyboardInterrupt:

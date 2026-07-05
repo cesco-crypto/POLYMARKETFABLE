@@ -152,6 +152,31 @@ class Portfolio:
         if pos.shares <= 1e-9:
             self.positions.pop(fill.token_id, None)
 
+    def settle_position(self, token_id: str, payout_per_share: float,
+                        question: str = "") -> float:
+        """Position eines AUFGELÖSTEN Markts zur finalen Auszahlung ausbuchen.
+
+        Kapital-Deadlock-Fix (Befund Agenten-Flotte 05.07.2026): Ohne
+        Settlement wächst total_exposure() monoton und der Risk-Manager
+        blockt nach ~7-8 Paaren dauerhaft. Gewinner zahlen 1 USDC/Share,
+        Verlierer 0 — beides wird ehrlich realisiert (ein wertloses Bein
+        ist ein realisierter Verlust, kein ewiger Bestand).
+
+        Rückgabe: ausgezahlte USDC (0.0 wenn Position nicht existiert).
+        """
+        pos = self.positions.get(token_id)
+        if pos is None or pos.shares <= 1e-9:
+            return 0.0
+        payout = pos.shares * payout_per_share
+        pnl = payout - pos.cost_basis
+        self.cash += payout
+        self.realized_pnl += pnl
+        log.info("Settlement: %.2f Shares %s (%s) zu %.0f%% -> %+.2f USDC "
+                 "(PnL %+.2f)", pos.shares, token_id[:16], question[:50],
+                 payout_per_share * 100, payout, pnl)
+        self.positions.pop(token_id, None)
+        return payout
+
     # ---- Merge zu USDC (Paper-Pendant zum on-chain CTF-Merge) --------------
 
     def _consume_shares(self, token_id: str, shares: float) -> float:
