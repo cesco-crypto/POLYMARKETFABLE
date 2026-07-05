@@ -63,13 +63,19 @@ def strategy_from_reason(reason: str) -> str:
 
 @dataclass
 class ShadowRecord:
-    """Vergleichs-Datensatz für EIN Signal in EINEM Tick.
+    """Vergleichs-Datensatz für EIN Signal-Bein über EINE Episode.
 
-    paper_fill/live_fill in Shares; capture_ratio = live/paper oder None,
-    wenn auch der Paper-Schatten nichts gefüllt hat (Quote undefiniert).
+    Episoden-Dedup (Befund Agenten-Flotte 05.07.2026): Dieselbe
+    Gelegenheit signalisiert bei 0.5s-Ticks hunderte Male neu — pro Tick
+    geloggt war paper_notional ~60x aufgeblasen und die Capture-Quote
+    strukturell gegen 0 gedrückt. Jetzt gilt: EINE Episode = eine
+    zusammenhängend signalisierende Gelegenheit (Gruppen-Identität, endet
+    nach EPISODE_GAP_S Stille). paper_fill ist die grösste Einzel-Tick-
+    Füllung des Schattens (das einmalig nehmbare Angebot), live_fill die
+    Summe aller Live-Fills der Episode.
     """
 
-    ts: float
+    ts: float               # Episodenbeginn
     token_id: str
     side: str
     price: float
@@ -81,6 +87,8 @@ class ShadowRecord:
     paper_fill: float
     live_fill: float
     capture_ratio: float | None
+    episode_ticks: int = 1  # wie oft die Gelegenheit signalisiert hat
+    episode_s: float = 0.0  # Episodendauer (letzter - erster Tick)
 
 
 def _sum_by_key(fills: list[Fill]) -> dict[tuple[str, str, str], float]:
@@ -90,6 +98,35 @@ def _sum_by_key(fills: list[Fill]) -> dict[tuple[str, str, str], float]:
         k = (f.token_id, f.side, f.reason)
         out[k] = out.get(k, 0.0) + f.size
     return out
+
+
+@dataclass
+class _Leg:
+    """Ein Signal-Bein innerhalb einer Episode."""
+
+    token_id: str
+    side: str
+    price: float
+    size: float
+    reason: str
+    group: str | None
+    expected_edge: float
+    paper_best: float = 0.0   # grösste Einzel-Tick-Füllung des Schattens
+    live_total: float = 0.0   # Summe aller Live-Fills der Episode
+
+
+@dataclass
+class _Episode:
+    """Eine zusammenhängend signalisierende Gelegenheit."""
+
+    first_ts: float
+    last_ts: float
+    ticks: int = 0
+    legs: dict = None  # legkey -> _Leg
+
+    def __post_init__(self):
+        if self.legs is None:
+            self.legs = {}
 
 
 class ShadowTracker:
@@ -102,11 +139,21 @@ class ShadowTracker:
     Arbs das Cash ausgeht und die Quote künstlich fällt.
     """
 
+    # Episode endet nach so vielen Sekunden ohne erneutes Signal. Länger als
+    # das Delayed-Order-Poll-Fenster (15s), damit verspätet reconcilte
+    # Live-Fills noch ihrer Episode zugerechnet werden.
+    EPISODE_GAP_S = 30.0
+    # Dauerbrenner-Episoden spätestens nach so vielen Sekunden schliessen
+    # (bounded memory; eine stundenlang stehende "Gelegenheit" ist ohnehin
+    # ein Stale-Book-Verdachtsfall und soll periodisch im Log auftauchen).
+    EPISODE_MAX_S = 600.0
+
     def __init__(self, cfg: BotConfig, path: str | Path = DEFAULT_SHADOW_PATH,
                  start_cash: float | None = None):
         self.cfg = cfg
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._episodes: dict[str, _Episode] = {}
         self.broker = PaperBroker(cfg)
         # Kein Latenz-Verzug im Schatten: er misst die theoretische
         # Gelegenheit ZUM Signalzeitpunkt gegen die realen Live-Fills
@@ -139,19 +186,23 @@ class ShadowTracker:
                 self._merge(snap)
             paper_avail = _sum_by_key(paper_fills)
             live_avail = _sum_by_key(list(live_fills))
+            # ZUERST abgelaufene Episoden schliessen — sonst würde ein
+            # Signal nach langer Stille die alte Episode endlos verlängern,
+            # statt eine neue Gelegenheit zu beginnen.
+            records = self._close_due(ts)
             for s in signals:
                 k = (s.token_id, s.side, s.reason)
                 paper = min(s.size, paper_avail.get(k, 0.0))
                 paper_avail[k] = paper_avail.get(k, 0.0) - paper
                 live = min(s.size, live_avail.get(k, 0.0))
                 live_avail[k] = live_avail.get(k, 0.0) - live
-                ratio = live / paper if paper > 1e-9 else None
-                records.append(ShadowRecord(
-                    ts=ts, token_id=s.token_id, side=s.side, price=s.price,
-                    size=s.size, reason=s.reason,
-                    strategy=strategy_from_reason(s.reason), group=s.group,
-                    expected_edge=s.expected_edge,
-                    paper_fill=paper, live_fill=live, capture_ratio=ratio))
+                self._feed_episode(s, paper, live, ts)
+            # Live-Fills OHNE Signal in diesem Tick (z.B. verspätet
+            # reconcilte Delayed-Orders): der noch offenen Episode desselben
+            # Beins zurechnen, sonst fehlt genau der Fill, den wir messen.
+            for (token, side, reason), size in live_avail.items():
+                if size > 1e-9:
+                    self._feed_stray_live(token, side, reason, size)
             if records:
                 self._write(records)
             # Historie kappen — der Schatten läuft potenziell tagelang.
@@ -159,6 +210,71 @@ class ShadowTracker:
                 del self.portfolio.fills[:-MAX_SHADOW_FILLS]
         except Exception as e:  # noqa: BLE001 — Messpfad darf den Tick nie crashen
             log.warning("Schattenvergleich fehlgeschlagen: %s", e)
+        return records
+
+    # ---- Episoden-Verwaltung -------------------------------------------------
+
+    @staticmethod
+    def _episode_key(s: Signal) -> str:
+        return s.group or f"solo|{s.token_id}|{s.side}|{s.reason}"
+
+    def _feed_episode(self, s: Signal, paper: float, live: float,
+                      ts: float) -> None:
+        ep = self._episodes.get(self._episode_key(s))
+        if ep is None:
+            # last_ts=-1: der erste Feed unten zählt als Tick 1.
+            ep = _Episode(first_ts=ts, last_ts=-1.0)
+            self._episodes[self._episode_key(s)] = ep
+        if ep.last_ts < ts:  # ersten Feed pro Tick zählen (Beine teilen den ts)
+            ep.ticks += 1
+        ep.last_ts = ts
+        legkey = f"{s.token_id}|{s.side}|{s.reason}"
+        leg = ep.legs.get(legkey)
+        if leg is None:
+            leg = _Leg(token_id=s.token_id, side=s.side, price=s.price,
+                       size=s.size, reason=s.reason, group=s.group,
+                       expected_edge=s.expected_edge)
+            ep.legs[legkey] = leg
+        # Angebot = grösste Einzel-Tick-Füllung (das einmalig Nehmbare) —
+        # NICHT die Summe über Ticks (das war die 60x-Inflation).
+        leg.paper_best = max(leg.paper_best, paper)
+        leg.live_total += live
+
+    def _feed_stray_live(self, token: str, side: str, reason: str,
+                         size: float) -> None:
+        for ep in self._episodes.values():
+            leg = ep.legs.get(f"{token}|{side}|{reason}")
+            if leg is not None:
+                leg.live_total += size
+                return
+
+    def _close_due(self, now: float, force: bool = False) -> list[ShadowRecord]:
+        """Abgelaufene Episoden schliessen und als je 1 Record/Bein ausgeben."""
+        out: list[ShadowRecord] = []
+        for key in list(self._episodes):
+            ep = self._episodes[key]
+            if not force and (now - ep.last_ts) < self.EPISODE_GAP_S \
+                    and (now - ep.first_ts) < self.EPISODE_MAX_S:
+                continue
+            for leg in ep.legs.values():
+                ratio = (leg.live_total / leg.paper_best
+                         if leg.paper_best > 1e-9 else None)
+                out.append(ShadowRecord(
+                    ts=ep.first_ts, token_id=leg.token_id, side=leg.side,
+                    price=leg.price, size=leg.size, reason=leg.reason,
+                    strategy=strategy_from_reason(leg.reason), group=leg.group,
+                    expected_edge=leg.expected_edge,
+                    paper_fill=leg.paper_best, live_fill=leg.live_total,
+                    capture_ratio=ratio, episode_ticks=ep.ticks,
+                    episode_s=ep.last_ts - ep.first_ts))
+            del self._episodes[key]
+        return out
+
+    def flush(self) -> list[ShadowRecord]:
+        """Alle offenen Episoden schliessen (Prozessende) und schreiben."""
+        records = self._close_due(time.time(), force=True)
+        if records:
+            self._write(records)
         return records
 
     def _merge(self, snap: MarketSnapshot) -> None:

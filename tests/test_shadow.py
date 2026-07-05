@@ -52,8 +52,9 @@ def tracker(tmp_path) -> ShadowTracker:
 
 def test_voller_live_fill_capture_1(tmp_path):
     t = tracker(tmp_path)
-    recs = t.observe([make_signal(size=10.0)], make_books(),
-                     [live_fill(10.0)], ts=1_000.0)
+    assert t.observe([make_signal(size=10.0)], make_books(),
+                     [live_fill(10.0)], ts=1_000.0) == []  # Episode offen
+    recs = t.flush()
     assert len(recs) == 1
     assert recs[0].paper_fill == pytest.approx(10.0)
     assert recs[0].live_fill == pytest.approx(10.0)
@@ -67,7 +68,8 @@ def test_voller_live_fill_capture_1(tmp_path):
 
 def test_kein_live_fill_capture_0(tmp_path):
     t = tracker(tmp_path)
-    recs = t.observe([make_signal(size=10.0)], make_books(), [], ts=1_000.0)
+    t.observe([make_signal(size=10.0)], make_books(), [], ts=1_000.0)
+    recs = t.flush()
     assert recs[0].paper_fill == pytest.approx(10.0)
     assert recs[0].live_fill == 0.0
     assert recs[0].capture_ratio == pytest.approx(0.0)
@@ -75,8 +77,9 @@ def test_kein_live_fill_capture_0(tmp_path):
 
 def test_teil_fill_anteilige_capture(tmp_path):
     t = tracker(tmp_path)
-    recs = t.observe([make_signal(size=10.0)], make_books(),
-                     [live_fill(4.0)], ts=1_000.0)
+    t.observe([make_signal(size=10.0)], make_books(),
+              [live_fill(4.0)], ts=1_000.0)
+    recs = t.flush()
     assert recs[0].paper_fill == pytest.approx(10.0)
     assert recs[0].live_fill == pytest.approx(4.0)
     assert recs[0].capture_ratio == pytest.approx(0.4)
@@ -88,8 +91,8 @@ def test_kein_paper_fill_quote_undefiniert(tmp_path):
     # Aggregation heraus.
     t = tracker(tmp_path)
     books = {"t1": OrderBook("t1", bids=[], asks=[])}
-    recs = t.observe([make_signal(size=10.0)], books, [live_fill(4.0)],
-                     ts=1_000.0)
+    t.observe([make_signal(size=10.0)], books, [live_fill(4.0)], ts=1_000.0)
+    recs = t.flush()
     assert recs[0].paper_fill == 0.0
     assert recs[0].capture_ratio is None
     line = json.loads((tmp_path / "shadow.jsonl").read_text().strip())
@@ -101,9 +104,13 @@ def test_zwei_signale_teilen_sich_die_live_fills(tmp_path):
     # Live-Fill-Menge wird greedy verteilt, nicht doppelt gezählt.
     t = tracker(tmp_path)
     sigs = [make_signal(size=10.0), make_signal(size=10.0)]
-    recs = t.observe(sigs, make_books(), [live_fill(15.0)], ts=1_000.0)
-    assert recs[0].live_fill == pytest.approx(10.0)
-    assert recs[1].live_fill == pytest.approx(5.0)
+    t.observe(sigs, make_books(), [live_fill(15.0)], ts=1_000.0)
+    recs = t.flush()
+    # Beide Signale teilen denselben Episoden-Leg-Schlüssel: die Episode
+    # führt EIN Bein mit der Summe der Live-Fills (15) und dem größten
+    # Einzel-Tick-Paper-Angebot.
+    assert len(recs) == 1
+    assert recs[0].live_fill == pytest.approx(15.0)
 
 
 def test_schatten_portfolio_bleibt_intern_und_merged(tmp_path):
@@ -222,6 +229,7 @@ def test_tick_live_speist_shadow_tracker(tmp_path):
     fills = main.tick(cfg, snap, [OneSignalStrategy(cfg)], RiskManager(cfg),
                       PaperBroker(cfg), pf, shadow=shadow)
     assert fills == 1
+    shadow.flush()  # Prozessende: offene Episoden schreiben (wie cmd_run)
     rows = load_shadow(tmp_path / "shadow.jsonl")
     assert len(rows) == 1
     assert rows[0]["paper_fill"] == pytest.approx(10.0)
@@ -264,3 +272,70 @@ def test_cmd_capture_report_ohne_daten_bricht_freundlich_ab(tmp_path, capsys):
     assert main.cmd_capture_report(BotConfig(),
                                    shadow_path=tmp_path / "fehlt.jsonl") is None
     assert "Keine Schattenvergleichs-Daten" in capsys.readouterr().out
+
+
+# ---- Episoden-Dedup (Befund Agenten-Flotte 05.07.2026) -------------------------
+
+
+def test_episode_dedup_hundert_ticks_ergeben_einen_datensatz(tmp_path):
+    """DER Fix: dieselbe Gelegenheit über 100 Ticks = 1 Record, nicht 100."""
+    t = tracker(tmp_path)
+    sig = Signal(token_id="t1", side="BUY", price=0.5, size=10.0,
+                 reason=REASON, group="comp:0xabc", expected_edge=0.5)
+    for i in range(100):
+        t.observe([sig], make_books(), [], ts=1_000.0 + i * 0.5)
+    recs = t.flush()
+    assert len(recs) == 1
+    assert recs[0].episode_ticks == 100
+    assert recs[0].episode_s == pytest.approx(49.5)
+    assert recs[0].paper_fill == pytest.approx(10.0)   # Angebot, keine Summe
+    assert recs[0].capture_ratio == pytest.approx(0.0)
+
+
+def test_episode_endet_nach_stille_und_neue_beginnt(tmp_path):
+    t = tracker(tmp_path)
+    sig = Signal(token_id="t1", side="BUY", price=0.5, size=10.0,
+                 reason=REASON, group="comp:0xabc", expected_edge=0.5)
+    t.observe([sig], make_books(), [], ts=1_000.0)
+    # Nach mehr als EPISODE_GAP_S Stille schliesst die alte Episode beim
+    # nächsten observe und eine neue beginnt.
+    recs = t.observe([sig], make_books(), [],
+                     ts=1_000.0 + t.EPISODE_GAP_S + 1)
+    assert len(recs) == 1                       # alte Episode geschrieben
+    assert len(t.flush()) == 1                  # neue Episode war offen
+
+
+def test_dauerbrenner_episode_wird_nach_max_s_geschlossen(tmp_path):
+    t = tracker(tmp_path)
+    sig = Signal(token_id="t1", side="BUY", price=0.5, size=10.0,
+                 reason=REASON, group="comp:0xabc", expected_edge=0.5)
+    ts = 1_000.0
+    closed = []
+    while ts < 1_000.0 + t.EPISODE_MAX_S + 30:
+        closed += t.observe([sig], make_books(), [], ts=ts)
+        ts += 10.0
+    assert len(closed) >= 1                     # Stale-Book-Dauerbrenner sichtbar
+
+
+def test_verspaeteter_live_fill_wird_der_episode_zugerechnet(tmp_path):
+    """Delayed-Order-Fall: Fill kommt Ticks später über reconcile, ohne
+    dass das Signal in dem Tick erneut freigegeben wurde."""
+    t = tracker(tmp_path)
+    sig = Signal(token_id="t1", side="BUY", price=0.5, size=10.0,
+                 reason=REASON, group="comp:0xabc", expected_edge=0.5)
+    t.observe([sig], make_books(), [], ts=1_000.0)
+    t.observe([], make_books(), [live_fill(6.0)], ts=1_010.0)  # kein Signal
+    recs = t.flush()
+    assert len(recs) == 1
+    assert recs[0].live_fill == pytest.approx(6.0)
+    assert recs[0].capture_ratio == pytest.approx(0.6)
+
+
+def test_zwei_gruppen_sind_zwei_episoden(tmp_path):
+    t = tracker(tmp_path)
+    s1 = Signal(token_id="t1", side="BUY", price=0.5, size=10.0,
+                reason=REASON, group="comp:0xaaa", expected_edge=0.5)
+    s2 = Signal(token_id="t1", side="BUY", price=0.5, size=10.0,
+                reason=REASON, group="comp:0xbbb", expected_edge=0.5)
+    t.observe([s1, s2], make_books(token="t1", depth=100.0), [], ts=1_000.0)
+    assert len(t.flush()) == 2

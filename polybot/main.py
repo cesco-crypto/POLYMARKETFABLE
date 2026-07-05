@@ -800,6 +800,10 @@ def cmd_run(cfg: BotConfig) -> None:
         console.print("Gestoppt. Portfolio gespeichert.")
     finally:
         portfolio.save(state_path)
+        if shadow is not None:
+            # Offene Mess-Episoden schliessen — sonst fehlt der letzte
+            # Datenpunkt der Capture-Messung bei jedem 90-Min-Neustart.
+            shadow.flush()
         worker.stop()  # daemon-Thread: kein Join auf laufenden REST-Refresh nötig
         if streamer is not None:
             streamer.stop()
