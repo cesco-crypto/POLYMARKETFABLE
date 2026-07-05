@@ -799,6 +799,11 @@ def cmd_run(cfg: BotConfig) -> None:
     except KeyboardInterrupt:
         console.print("Gestoppt. Portfolio gespeichert.")
     finally:
+        # Kein Zustand »Bot tot, Orders leben«: bei Kill-Switch, Ctrl-C
+        # oder Crash ALLE offenen Börsen-Orders canceln (Live-Broker).
+        cancel_all = getattr(broker, "cancel_all_orders", None)
+        if cancel_all is not None:
+            cancel_all("Prozessende")
         portfolio.save(state_path)
         if shadow is not None:
             # Offene Mess-Episoden schliessen — sonst fehlt der letzte

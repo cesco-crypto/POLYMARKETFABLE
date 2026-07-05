@@ -93,6 +93,9 @@ class FakeClobClient:
     def cancel_order(self, payload):
         self.cancelled.append(payload.orderID)
 
+    def cancel_all(self):
+        self.cancel_all_calls = getattr(self, "cancel_all_calls", 0) + 1
+
 
 def make_live_broker(client: FakeClobClient, cooldown_s: float = 0.0) -> LiveBroker:
     # __init__ umgehen (verlangt Key + Netzwerk); nur die Felder setzen,
@@ -343,6 +346,9 @@ class _CapturingClobClient:
 
     def get_address(self):
         return "0xEOA"
+
+    def cancel_all(self):
+        type(self).cancel_all_calls = getattr(type(self), "cancel_all_calls", 0) + 1
 
 
 def _live_cfg(funder: str | None, signature_type: int) -> BotConfig:
@@ -1142,3 +1148,40 @@ def test_paperbroker_maker_fill_verbraucht_gegenseite_nur_einmal():
     # Unverändertes Buch: die Rest-Quote (20) darf NICHT erneut füllen.
     assert broker.execute([], {"tok": book}, pf) == 0
     assert pf.positions["tok"].shares == pytest.approx(10)
+
+
+# ---- cancel_all bei Start/Stop (Befund Agenten-Flotte 05.07.2026) ------------
+
+
+def test_livebroker_init_cancelt_alt_orders(monkeypatch):
+    """Orders eines abgestürzten Vorgänger-Prozesses leben auf der Börse
+    weiter — der Start muss mit einem sauberen Orderbuch beginnen."""
+    import py_clob_client_v2.client as clob_mod
+
+    monkeypatch.setattr(clob_mod, "ClobClient", _CapturingClobClient)
+    _CapturingClobClient.cancel_all_calls = 0
+    LiveBroker(_live_cfg(None, 3))
+    assert _CapturingClobClient.cancel_all_calls == 1
+
+
+def test_cancel_all_orders_leert_tracking():
+    client = FakeClobClient()
+    broker = make_live_broker(client)
+    broker._pending["oid1"] = object()
+    broker._open_orders["tok"] = ["oid1"]
+    assert broker.cancel_all_orders("Test") is True
+    assert client.cancel_all_calls == 1
+    assert broker._pending == {} and broker._open_orders == {}
+
+
+def test_cancel_all_orders_wirft_nie(caplog):
+    import logging
+
+    class BoomClient(FakeClobClient):
+        def cancel_all(self):
+            raise RuntimeError("CLOB down")
+
+    broker = make_live_broker(BoomClient())
+    with caplog.at_level(logging.ERROR):
+        assert broker.cancel_all_orders("Test") is False
+    assert any("VON HAND" in r.message for r in caplog.records)

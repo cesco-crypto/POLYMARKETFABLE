@@ -567,6 +567,36 @@ class LiveBroker(Broker):
                 log.error("MergeExecutor nicht initialisierbar: %s — "
                           "Live-Auto-Merge deaktiviert", e)
         log.info("Live-Broker verbunden (Adresse %s)", self.client.get_address())
+        # Start-Hygiene (Befund Agenten-Flotte 05.07.2026): Orders eines
+        # abgestürzten/gestoppten Vorgänger-Prozesses leben auf der Börse
+        # weiter und füllen unbeaufsichtigt — beim Start alles canceln.
+        # Der neue Prozess kennt die Alt-Orders nicht (kein persistiertes
+        # Order-Tracking), Cancel ist die einzige sichere Option; gefüllte
+        # Mengen holt der Settlement-/Waisen-Pfad über die Positionen ein.
+        self.cancel_all_orders("Prozessstart")
+
+    # ---- Not-Aus: alle offenen Börsen-Orders canceln -------------------------
+
+    def cancel_all_orders(self, why: str) -> bool:
+        """ALLE offenen Orders dieses Kontos auf dem CLOB canceln.
+
+        Der gefährlichste Zustand ist »Bot tot, Orders leben«: ruhende
+        GTC-Orders (MM-Quotes, Waisen-SELLs) füllen nach Kill-Switch/Crash
+        unbeaufsichtigt weiter, ohne dass irgendjemand sie bucht. Wird beim
+        Prozessstart und beim Prozessende (cmd_run finally) gerufen.
+        Wirft nie — ein fehlgeschlagenes Cancel wird laut geloggt, damit
+        der Betreiber von Hand eingreifen kann.
+        """
+        try:
+            self.client.cancel_all()
+            self._pending.clear()
+            self._open_orders.clear()
+            log.info("Alle offenen Börsen-Orders gecancelt (%s)", why)
+            return True
+        except Exception as e:  # noqa: BLE001 — Not-Aus darf nie selbst crashen
+            log.error("cancel_all fehlgeschlagen (%s): %s — offene Orders "
+                      "ggf. VON HAND auf polymarket.com prüfen!", why, e)
+            return False
 
     # ---- Ausführung --------------------------------------------------------
 
