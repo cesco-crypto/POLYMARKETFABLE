@@ -36,7 +36,22 @@ Direkte web3-Contract-Calls (der py-clob-client-v2 hat keine Helfer):
 
 Siehe [risk-and-execution](risk-and-execution.md): bucht final
 aufgelöste Positionen aus (`Portfolio.settle_position`); Ledger-Eintrag
-`kind=settlement`; aktiv in paper UND live.
+`kind=settlement`; aktiv in paper UND live. Der Sweep deckt auch Tokens
+ruhender Orders ab (tote Quoten geben ihre Cash-Reservierung frei).
+**Settled-Registry** (`Portfolio.settled`, persistiert): einmal
+ausgezahlte Tokens werden nie doppelt gesettelt und vom Positions-Sync
+nicht wieder eingetragen, bis das on-chain Redeem durch ist.
+
+## `possync.py` — Positions-Sync (Chain-Wahrheit)
+
+Beim Live-Start und danach alle 15 Min: Portfolio-Positionen gegen die
+Data-API abgleichen (Downtime-Fills nachtragen, manuelle Eingriffe
+austragen — ohne PnL-/Cash-Buchung, day_start wird Kill-Switch-neutral
+verschoben). Schutzregeln: settled-Registry, 15-Min-Fill-Schonfrist
+gegen API-Lag, Leerantwort-Guard (falsche Wallet-Adresse löscht NICHTS),
+sizeThreshold=0.01. Der Gamma-/Data-Lookup nutzt das WIEDERHOLTE
+Query-Param-Format in 20er-Chunks mit limit — Komma-Listen lehnt der
+Server mit 422 ab (kritischer Befund der Verifikations-Flotte).
 
 ## Deposit-Wallet-Flow & Preflight
 
