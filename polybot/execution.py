@@ -444,7 +444,10 @@ class LiveBroker(Broker):
     """
 
     # Polling für Orders mit Matching-Delay (z.B. Sport in-play).
-    DELAY_POLL_ATTEMPTS = 10
+    # In-play-Märkte (Sport/Esports) haben serverseitig einen Matching-Delay;
+    # 15s Poll-Fenster, sonst verliert das Cancel das Race gegen das Matching
+    # (Lehre vom ersten Live-Trade 05.07.: Order matchte nach >5s trotz Cancel).
+    DELAY_POLL_ATTEMPTS = 30
     DELAY_POLL_INTERVAL_S = 0.5
     # Nach so vielen erfolglosen get_order-Abfragen wird das Tracking beendet.
     MAX_RECONCILE_MISSES = 10
@@ -758,7 +761,8 @@ class LiveBroker(Broker):
             if status == "matched":
                 return "matched", self._book_order_state(s, o, price, portfolio, fee_rates)
             if status in ("canceled", "cancelled", "unmatched"):
-                return "failed", None
+                return self._book_delayed_leftover(s, o, order_id, price,
+                                                   portfolio, fee_rates)
         try:
             self.client.cancel_order(OrderPayload(orderID=order_id))
         except Exception as e:  # noqa: BLE001
@@ -766,8 +770,32 @@ class LiveBroker(Broker):
         o = self._get_order_safe(order_id)
         if o and o.get("status") == "matched":
             return "matched", self._book_order_state(s, o, price, portfolio, fee_rates)
-        log.error("Delayed-Order %s nicht bestätigt — gecancelt und als Fehlschlag gewertet",
-                  order_id)
+        return self._book_delayed_leftover(s, o, order_id, price, portfolio, fee_rates)
+
+    def _book_delayed_leftover(self, s: Signal, o: dict | None, order_id: str,
+                               price: float, portfolio: Portfolio,
+                               fee_rates: dict[str, float]) -> tuple[str, Fill | None]:
+        """Endzustand einer delayed Order ehrlich verbuchen.
+
+        Lehre vom ersten Live-Trade (05.07.): Das Cancel kann das Race gegen
+        das Matching VERLIEREN — die Order ist dann trotz Status "canceled"
+        (teil-)gefüllt. size_matched ist die Wahrheit, nicht der Status; ohne
+        diese Buchung driftet das Ledger von der Realität weg und das
+        Arb-Gegenbein fehlt.
+        """
+        matched = _to_float((o or {}).get("size_matched") or (o or {}).get("sizeMatched"))
+        if matched > 1e-9:
+            fill = self._book_order_state(s, o, price, portfolio, fee_rates)
+            log.warning("Delayed-Order %s trotz Cancel (teil-)gefüllt: %.2f Shares "
+                        "@%.4f — als Fill gebucht", order_id, fill.size, fill.price)
+            return "matched", fill
+        # Wirklich ungefüllt: sofortiges Neu-Feuern im nächsten 0.5s-Tick
+        # würde nur das nächste Race provozieren und riskiert Doppel-Fills.
+        if self.reject_cooldown_s > 0:
+            self._reject_until[s.token_id] = time.time() + self.reject_cooldown_s
+        log.error("Delayed-Order %s nicht bestätigt — gecancelt, als Fehlschlag "
+                  "gewertet, Token %s für %.0fs im Cooldown", order_id,
+                  s.token_id[:12], self.reject_cooldown_s)
         return "failed", None
 
     # ---- Buchung -----------------------------------------------------------

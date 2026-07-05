@@ -1033,3 +1033,37 @@ def test_fok_gruppe_ohne_konforme_size_wird_verworfen():
     books = {"yes": OrderBook(token_id="yes", bids=[], asks=[Level(0.99, 100)])}
     assert broker.execute(legs, books, pf) == 0
     assert client.posted == []  # nichts gesendet, nichts abgelehnt
+
+
+# ---- Delayed-Orders: size_matched ist die Wahrheit (erster Live-Trade 05.07.) --
+
+def test_delayed_order_trotz_cancel_gefuellt_wird_gebucht():
+    """Race verloren: Order matcht, obwohl der Bot sie cancelt. Der Status
+    sagt "canceled", size_matched sagt 20 — gebucht werden muss der Fill."""
+    client = FakeClobClient(statuses={"tok": "delayed"})
+    broker = make_live_broker(client)
+    pf = Portfolio(cash=100.0)
+    # get_order liefert dauerhaft "live" -> Poll-Fenster läuft ab -> Cancel;
+    # der Zustand danach zeigt canceled MIT gefüllter Größe.
+    client.orders["oid1"] = {"status": "canceled", "size_matched": "20",
+                             "price": "0.06"}
+    sig = Signal(token_id="tok", side="BUY", price=0.06, size=20, reason="arb",
+                 group="g1")
+    book = OrderBook(token_id="tok", bids=[Level(0.05, 100)], asks=[Level(0.06, 100)])
+    fills = broker.execute([sig], {"tok": book}, pf)
+    assert fills == 1
+    assert pf.positions["tok"].shares == pytest.approx(20)
+    assert pf.cash == pytest.approx(100.0 - 1.20)
+
+
+def test_delayed_order_ungefuellt_setzt_cooldown():
+    client = FakeClobClient(statuses={"tok": "delayed"})
+    broker = make_live_broker(client, cooldown_s=60)
+    pf = Portfolio(cash=100.0)
+    client.orders["oid1"] = {"status": "canceled", "size_matched": "0"}
+    sig = Signal(token_id="tok", side="BUY", price=0.06, size=20, reason="arb",
+                 group="g1")
+    fills = broker.execute([sig], {}, pf)
+    assert fills == 0
+    assert pf.positions == {}
+    assert broker._token_blocked("tok")  # kein sofortiges Neu-Feuern
