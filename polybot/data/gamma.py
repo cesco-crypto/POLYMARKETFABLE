@@ -77,8 +77,13 @@ class Market:
                 out.append(1.0)
             elif p <= 0.001:
                 out.append(0.0)
+            elif abs(p - 0.5) <= 0.001:
+                # 50/50-Auflösung (Unentschieden/Ambiguität): beide Seiten
+                # zahlen 0.5 — ohne diesen Fall bliebe die Position ewig
+                # liegen (Selbst-Review 05.07.2026).
+                out.append(0.5)
             else:
-                return None  # kein eindeutiger Gewinner (z.B. 50/50-Split)
+                return None  # Handels-Zwischenstand, keine finale Auszahlung
         if sum(out) != 1.0:
             return None  # Binärmarkt zahlt genau 1 USDC pro Paar aus
         return out[0], out[1]

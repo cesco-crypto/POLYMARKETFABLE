@@ -164,3 +164,13 @@ def test_tick_integration_settlement_loest_deadlock():
          sweeper=SettlementSweeper(FakeGamma([market(prices=(1.0, 0.0))])))
     assert pf.total_exposure() == 0.0
     assert pf.cash == pytest.approx(1_000.0 - 10.0 + 20.0)
+
+
+def test_resolved_payouts_50_50_split():
+    """Unentschieden/ambige Auflösung: beide Seiten zahlen 0.5 — die
+    Position darf nicht ewig liegen bleiben (Selbst-Review 05.07.)."""
+    assert market(prices=(0.5, 0.5)).resolved_payouts() == (0.5, 0.5)
+    pf = pf_with(buy("yes1", 10, price=0.4))
+    sw = SettlementSweeper(FakeGamma([market(prices=(0.5, 0.5))]))
+    assert sw.sweep(pf, now=T0) == pytest.approx(5.0)
+    assert pf.positions == {}

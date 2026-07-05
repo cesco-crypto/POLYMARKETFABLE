@@ -228,7 +228,11 @@ class ShadowTracker:
         if ep.last_ts < ts:  # ersten Feed pro Tick zählen (Beine teilen den ts)
             ep.ticks += 1
         ep.last_ts = ts
-        legkey = f"{s.token_id}|{s.side}|{s.reason}"
+        # Bein-Schlüssel OHNE reason: der Grund trägt den Edge-Wert
+        # («Komplement-Arb Edge=0.050»), der sich pro Tick ändert — mit
+        # reason im Schlüssel zerfiele die Episode in ein Bein pro
+        # Edge-Wert und die Dedup wäre teilweise wieder aufgehoben.
+        legkey = f"{s.token_id}|{s.side}"
         leg = ep.legs.get(legkey)
         if leg is None:
             leg = _Leg(token_id=s.token_id, side=s.side, price=s.price,
@@ -242,8 +246,14 @@ class ShadowTracker:
 
     def _feed_stray_live(self, token: str, side: str, reason: str,
                          size: float) -> None:
+        """Live-Fill ohne Signal in diesem Tick der offenen Episode zuordnen.
+
+        Der reason des Fills stammt vom Ursprungs-Tick (mit dessen
+        Edge-Wert) — zugeordnet wird über (token, side); reason dient nur
+        noch der Diagnose.
+        """
         for ep in self._episodes.values():
-            leg = ep.legs.get(f"{token}|{side}|{reason}")
+            leg = ep.legs.get(f"{token}|{side}")
             if leg is not None:
                 leg.live_total += size
                 return

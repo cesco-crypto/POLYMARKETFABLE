@@ -177,6 +177,27 @@ class Portfolio:
         self.positions.pop(token_id, None)
         return payout
 
+    def force_set_position(self, token_id: str, shares: float,
+                           avg_price: float, question: str = "") -> None:
+        """Position hart auf die Chain-Wahrheit setzen (Positions-Sync).
+
+        Bewusst OHNE PnL-/Cash-Buchung: externe Veränderungen (Fills
+        während Downtime, manuelle Verkäufe/Claims des Betreibers) sind
+        kein Bot-PnL — aber Exposure/Waisen/Settlement müssen mit der
+        echten Position rechnen. Jede Korrektur wird laut geloggt.
+        """
+        old = self.positions.get(token_id)
+        old_shares = old.shares if old else 0.0
+        if shares <= 1e-9:
+            self.positions.pop(token_id, None)
+        else:
+            self.positions[token_id] = Position(
+                token_id=token_id, question=question, shares=shares,
+                cost_basis=shares * avg_price)
+        log.warning("Positions-Sync: %s (%s) %.2f -> %.2f Shares "
+                    "(extern verändert — kein Bot-PnL gebucht)",
+                    token_id[:16], question[:40], old_shares, shares)
+
     # ---- Merge zu USDC (Paper-Pendant zum on-chain CTF-Merge) --------------
 
     def _consume_shares(self, token_id: str, shares: float) -> float:

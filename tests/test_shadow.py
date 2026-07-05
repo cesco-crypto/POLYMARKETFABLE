@@ -339,3 +339,31 @@ def test_zwei_gruppen_sind_zwei_episoden(tmp_path):
                 reason=REASON, group="comp:0xbbb", expected_edge=0.5)
     t.observe([s1, s2], make_books(token="t1", depth=100.0), [], ts=1_000.0)
     assert len(t.flush()) == 2
+
+
+def test_wechselnder_edge_im_reason_fragmentiert_episode_nicht(tmp_path):
+    """Selbst-Review 05.07.: reason trägt den Edge-Wert, der pro Tick
+    schwankt — die Episode darf daran nicht in Beine zerfallen."""
+    t = tracker(tmp_path)
+    for i, edge in enumerate((0.050, 0.051, 0.049, 0.052)):
+        sig = Signal(token_id="t1", side="BUY", price=0.5, size=10.0,
+                     reason=f"Komplement-Arb Edge={edge:.3f}",
+                     group="comp:0xabc", expected_edge=edge)
+        t.observe([sig], make_books(), [], ts=1_000.0 + i * 0.5)
+    recs = t.flush()
+    assert len(recs) == 1
+    assert recs[0].episode_ticks == 4
+
+
+def test_stray_fill_mit_altem_reason_findet_die_episode(tmp_path):
+    """Live-Fill trägt den reason (Edge-Wert) seines Ursprungs-Ticks —
+    die Zuordnung läuft über (token, side)."""
+    t = tracker(tmp_path)
+    sig = Signal(token_id="t1", side="BUY", price=0.5, size=10.0,
+                 reason="Komplement-Arb Edge=0.050", group="comp:0xabc",
+                 expected_edge=0.5)
+    t.observe([sig], make_books(), [], ts=1_000.0)
+    fill = live_fill(6.0, reason="Komplement-Arb Edge=0.048")  # alter Edge
+    t.observe([], make_books(), [fill], ts=1_005.0)
+    recs = t.flush()
+    assert recs[0].live_fill == pytest.approx(6.0)

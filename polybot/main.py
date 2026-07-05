@@ -33,6 +33,7 @@ from polybot.data.stream import BookStreamer
 from polybot.execution import make_broker
 from polybot.orphan import OrphanFlattener
 from polybot.portfolio import Portfolio
+from polybot.possync import PositionSyncer
 from polybot.settlement import SettlementSweeper
 from polybot.preflight import cmd_preflight
 from polybot.recorder import (OpportunityRecorder, aggregate,
@@ -736,6 +737,19 @@ def cmd_run(cfg: BotConfig) -> None:
     state_path = "live_state.json" if cfg.mode == "live" else "paper_state.json"
     portfolio = Portfolio.load(state_path, start_cash=cfg.risk.paper_start_cash)
     broker = make_broker(cfg)
+    if cfg.mode == "live":
+        # Buchhaltung an die Chain-Wahrheit angleichen (Fills während
+        # Downtime, manuelle Eingriffe) — NACH make_broker, damit dessen
+        # Start-cancel_all keine In-flight-Orders mehr offen lässt.
+        addr = cfg.funder_address or getattr(
+            getattr(broker, "client", None), "get_address", lambda: None)()
+        if addr:
+            try:
+                PositionSyncer(addr).sync(portfolio)
+                portfolio.save(state_path)
+            except Exception as e:  # noqa: BLE001 — Sync nie startkritisch
+                log.error("Positions-Sync fehlgeschlagen: %s — Buchhaltung "
+                          "kann von der Chain abweichen", e)
     risk = RiskManager(cfg)
     unknown = [n for n in cfg.strategy.enabled if n not in REGISTRY]
     if unknown:
