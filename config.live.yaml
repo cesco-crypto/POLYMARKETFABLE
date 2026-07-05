@@ -1,0 +1,41 @@
+# LIVE-Konfiguration — Phase 1: Mikro-Kapital-Test.
+#
+# Ziel dieser Phase ist NICHT Gewinn, sondern die Messung der echten
+# Capture-Quote (capture-report) mit minimalem Risiko. Erst wenn nach
+# ~24-48h Live-Betrieb die Quote bekannt ist, werden Limits skaliert.
+#
+# Voraussetzungen (siehe README, Abschnitt Go-Live-Checkliste):
+# - Rechtslage geklärt (Verantwortung liegt beim Betreiber)
+# - Dediziertes Wallet NUR mit dem Testbudget (empfohlen: 300-500 USDC
+#   als pUSD + etwas POL für Gas), niemals das Hauptwallet
+# - POLY_PRIVATE_KEY (+ ggf. POLY_FUNDER_ADDRESS, POLY_SIGNATURE_TYPE)
+#   als Umgebungsvariablen/Secrets — NIE in Dateien im Repo, NIE im Chat
+
+mode: live
+poll_interval_s: 90
+
+risk:
+  max_order_usdc: 20           # Mikro-Orders: begrenzt jeden Einzelfehler
+  max_position_usdc: 60
+  max_total_exposure_usdc: 150
+  daily_loss_limit_usdc: 30    # Kill-Switch: harter Tagesboden
+  min_edge: 0.005              # live konservativer als Paper (0.002):
+                               # Ausführungslatenz frisst kleine Edges
+  paper_start_cash: 1000       # irrelevant im Live-Modus
+  taker_fee_rate: 0.07
+  live_auto_merge: true        # Paare/Sets on-chain zu USDC mergen
+
+strategy:
+  enabled:
+    - complement_arb           # NUR die validierte Strategie in Phase 1
+    # - negrisk_arb            # Phase 2, nachdem Capture-Quote bekannt ist
+    # - market_making          # Phase 3
+  scan_all_markets: true
+  min_liquidity_usdc: 2000
+  min_volume_24h_usdc: 500
+  min_time_to_end_s: 300       # live noch defensiver als Paper (120s)
+  max_negrisk_events: 20
+  max_negrisk_submarkets: 20
+  use_stream: true
+  stream_tick_s: 0.5
+  stream_max_tokens: 500
