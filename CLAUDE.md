@@ -1,8 +1,20 @@
 # Polybot — Arbeitsprinzipien
 
 ## Mission
-Ziel ist ein Paper-Trading-Ertrag von ~1000 USDC/Tag (Korridor 500–1500 ok),
-iterativ erarbeitet. Der Weg: messen → Engpass finden → bauen → wieder messen.
+Ziel ist ein ECHTER Ertrag von ~1000 USDC/Tag (Korridor 500–1500 ok) im
+Live-Betrieb, iterativ erarbeitet. Paper-Trading ist das Messinstrument auf
+dem Weg dorthin, nicht das Ziel. Der Weg: messen → Engpass finden → bauen →
+wieder messen → Live-Capture-Quote bestimmen → skalieren, bis die ECHTE
+Tagesrate im Korridor liegt.
+
+Stufenplan (Stand 05.07.2026):
+1. ✅ Paper-Rate über Ziel (>1000/Tag gemessen, bereinigt, validiert)
+2. ⏳ Livegang Phase 1 mit Mikro-Limits (wartet nur auf POLY_PRIVATE_KEY
+   als Umgebungs-Secret; Wallet 0x5cbE…d159 ist mit USDC+POL ausgestattet)
+3. ⏳ Capture-Quote messen (capture-report, 24-48h) — die eine Zahl, die
+   Paper von Real trennt
+4. ⏳ Skalieren (Limits/Kapital) bis echte Tagesrate 500-1500, mit
+   Re-Messung nach jeder Stufe
 
 ## Prinzip Nr. 1: Speed
 Nicht die Idee gewinnt, sondern wer schneller lernt, baut, verbessert und
