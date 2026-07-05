@@ -206,6 +206,9 @@ class OneSignalStrategy(Strategy):
 def live_cfg() -> BotConfig:
     cfg = BotConfig()
     cfg.mode = "live"
+    # Der PaperBroker dient hier als Live-Broker-Stand-in und muss wie ein
+    # Live-Broker im selben Tick füllen — kein simulierter Latenz-Verzug.
+    cfg.strategy.paper_fill_delay_ticks = 0
     return cfg
 
 

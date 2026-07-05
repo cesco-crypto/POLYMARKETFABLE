@@ -108,6 +108,12 @@ class ShadowTracker:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.broker = PaperBroker(cfg)
+        # Kein Latenz-Verzug im Schatten: er misst die theoretische
+        # Gelegenheit ZUM Signalzeitpunkt gegen die realen Live-Fills
+        # DESSELBEN Ticks — der Latenz-Nachteil ist genau das, was die
+        # Capture-Quote zeigen soll. Ein verzögerter Schatten würde ihn
+        # verstecken und die Signal-Zuordnung in observe() brechen.
+        self.broker.fill_delay_ticks = 0
         cash = cfg.risk.paper_start_cash if start_cash is None else start_cash
         self.portfolio = Portfolio(cash=cash, day_start_value=cash)
 

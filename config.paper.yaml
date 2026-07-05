@@ -33,10 +33,21 @@ strategy:
   min_liquidity_usdc: 2000    # breiter scannen als im Beispiel (10k)
   min_volume_24h_usdc: 500
   min_order_shares: 5         # Polymarket-Mindestordergröße
+  # Ehrliche Fill-Simulation: marketable Signale füllen erst im NÄCHSTEN
+  # execute()-Tick gegen das dann aktuelle Buch — live vergehen zwischen
+  # Signal und Order-Ankunft ~250ms (Erkennung + Order-RTT, Messung
+  # 05.07.2026), 1 Stream-Tick ≈ 0.6s liegt konservativ darüber.
+  # 0 = Sofort-Fill (altes, optimistisches Verhalten für Vergleichsmessungen).
+  paper_fill_delay_ticks: 1
   # WebSocket-Streaming: zwischen den (langen) REST-Snapshots prüft ein
   # Inner-Loop alle stream_tick_s die live gestreamten Orderbücher der
   # Kandidaten-Tokens — Reaktionszeit in Millisekunden statt 90s. Fällt der
   # Stream aus, läuft der Bot unverändert über REST weiter.
   use_stream: true
   stream_tick_s: 0.5
+  # 60s-Probeläufe 05.07.2026: 500 und 600 Abos -> 100% Buch-Abdeckung in
+  # <10s; 800 und 1000 Abos -> nur 15-20% nach 60s (der Server deckelt die
+  # book-Snapshots still zwischen 600 und 800). Deshalb bei 500 bleiben —
+  # mehr Abos hießen WENIGER echte Bücher. Die Priorisierung (kurzlebige
+  # Märkte zuerst, siehe stream_tokens) muss das Budget füllen, nicht Masse.
   stream_max_tokens: 500

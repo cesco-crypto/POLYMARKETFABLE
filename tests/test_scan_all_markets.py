@@ -190,6 +190,28 @@ def test_candidate_tokens_teilmengen_no_bei_unvollstaendigem_negrisk_event():
         t for m in ev for t in (m.yes_token, m.no_token)}
 
 
+def test_scan_all_kurzlebige_maerkte_bekommen_volle_buecher():
+    # Recorder-Sichtbarkeit (05.07.2026): kurzlebige Märkte im Stream-
+    # Ereignisfenster bekommen volle Bücher (extra_full), auch ohne
+    # Arb-Verdacht — sonst bleibt die Lebensdauer-Messung auf genau den
+    # Profitmärkten zensiert (synthetische Größe-0-Bücher werden verworfen).
+    import time as _time
+    cfg = BotConfig()
+    cfg.strategy.scan_all_markets = True
+    now = _time.time()
+    m_live, m_daily = market(1), market(2)
+    m_live.end_ts = now + 1_800  # endet in 30 Min -> im 2h-Fenster
+    gamma = FakeGamma([m_live, m_daily])
+    books = FakeTwoStageBooks({
+        # kein Markt ist Arb-Kandidat (Summen > 1.02):
+        "yes1": (0.50, 0.55), "no1": (0.50, 0.55),
+        "yes2": (0.50, 0.55), "no2": (0.50, 0.55),
+    })
+    main.build_snapshot(cfg, gamma, books)
+    # Voll geladen: nur die Tokens des kurzlebigen Markts.
+    assert books.book_requests == [["no1", "yes1"]]
+
+
 def test_scan_all_faellt_ohne_batchpreise_auf_volle_buecher_zurueck():
     # Book-Clients ohne get_top_prices (oder Batch-Komplettausfall) laden
     # weiterhin alle Bücher voll — kein stiller Datenverlust.

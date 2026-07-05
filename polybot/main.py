@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import threading
 import time
 from pathlib import Path
 
@@ -131,6 +132,38 @@ def _load_books(cfg: BotConfig, books: BookClient, token_ids: set[str],
     return book_map
 
 
+# Deckel für volle Bücher der kurzlebigen Märkte (extra_full in _load_books):
+# 300 Tokens ≙ 150 Märkte — deckt alle Up-or-Down/Esports-Fenster eines Ticks,
+# ohne den Batch-Books-Pfad zu sprengen (50 Tokens/Request -> +6 Requests).
+EXPIRING_FULL_BOOKS_CAP = 300
+
+
+def _expiring_tokens(markets: list[Market], window_s: float,
+                     now: float | None = None,
+                     cap: int = EXPIRING_FULL_BOOKS_CAP) -> set[str]:
+    """Tokens der kurzlebigen Märkte (endDate im Ereignisfenster), gedeckelt.
+
+    Dieselben Märkte, die das WSS-Abo priorisiert (stream_tokens), bekommen
+    im REST-Snapshot volle Bücher statt synthetischem Top-of-Book — sonst
+    bleibt die Lebensdauer-Messung des Recorders auf genau diesen Märkten
+    zensiert, weil Größe-0-Bücher von Strategien/Detektoren verworfen
+    werden. Läuft der Deckel voll, gewinnen die baldigst endenden Märkte
+    (end_ts aufsteigend) — dieselbe Rangfolge wie im Abo.
+    """
+    if window_s <= 0:
+        return set()
+    now = time.time() if now is None else now
+    expiring = sorted((m for m in markets
+                       if m.end_ts is not None and m.end_ts - now <= window_s),
+                      key=lambda m: m.end_ts)
+    out: set[str] = set()
+    for m in expiring:
+        if len(out) + 2 > cap:
+            break
+        out.update((m.yes_token, m.no_token))
+    return out
+
+
 def _implication_candidates(
     cfg: BotConfig, gamma: GammaClient,
     negrisk: dict[str, list[Market]],
@@ -219,9 +252,12 @@ def build_snapshot(cfg: BotConfig, gamma: GammaClient, books: BookClient,
     if s.scan_all_markets:
         # Beim Vollmarkt-Scan sind volle Bücher für alle Tokens unbezahlbar
         # (~7k Tokens): zweistufig laden — Batch-Top-of-Book für alle,
-        # volle Bücher nur für Arb-Kandidaten (siehe _load_books).
+        # volle Bücher nur für Arb-Kandidaten (siehe _load_books) plus die
+        # kurzlebigen Profitmärkte des Stream-Abos (Recorder-Sichtbarkeit).
+        extra_full = impl_tokens | _expiring_tokens(markets,
+                                                    s.stream_event_window_s)
         book_map = _load_books(cfg, books, token_ids, markets, negrisk,
-                               extra_full=impl_tokens)
+                               extra_full=extra_full)
     else:
         book_map = books.get_books(list(token_ids))
     # Tokenspezifische Taker-Fee-Raten (kategorieabhängig) aus den Gamma-
@@ -392,16 +428,25 @@ def tick(cfg: BotConfig, snap: MarketSnapshot, strategies, risk: RiskManager,
 
 def stream_tokens(snap: MarketSnapshot, cap: int,
                   event_window_s: float = 0.0,
-                  now: float | None = None) -> list[str]:
+                  now: float | None = None,
+                  min_time_to_end_s: float = 0.0) -> list[str]:
     """Kandidaten-Tokens für das WSS-Abo aus dem letzten REST-Snapshot.
 
-    NegRisk-Events zuerst und nur KOMPLETT (negrisk_arb braucht alle Beine
-    eines Events — halbe Events wären totes Abo-Budget), danach Binärmärkte:
-    zuerst die im EREIGNISFENSTER (endDate innerhalb event_window_s — dort
-    laufen die Live-Ereignisse, in denen sich Preisverwerfungen ballen;
-    Messbefund WM-Abend 04.07.2026), innerhalb der Gruppen absteigend nach
-    24h-Volumen, bis der Deckel erreicht ist. event_window_s=0 schaltet die
-    Fenster-Priorisierung ab (reine Volumen-Sortierung wie zuvor).
+    Priorität (Messbefund 05.07.2026: der Profit konzentriert sich auf
+    kurzlebige Crypto-'Up or Down'-5/15-Min-Märkte und Esports, die das
+    Abo-Budget vorher kaum abdeckte — Beobachtungsintervall 12-229s):
+
+    1. Binärmärkte im EREIGNISFENSTER (endDate innerhalb event_window_s),
+       AUFSTEIGEND nach end_ts — die baldigst endenden zuerst, denn dort ist
+       das Zeitfenster am knappsten. Märkte mit Restlaufzeit unterhalb
+       min_time_to_end_s fliegen ganz raus: sie sind nicht mehr handelbar
+       (totes Abo-Budget), und der Snapshot altert zwischen den Rotationen.
+    2. NegRisk-Events, nur KOMPLETT (negrisk_arb braucht alle Beine eines
+       Events — halbe Events wären totes Abo-Budget).
+    3. Übrige Binärmärkte absteigend nach 24h-Volumen.
+
+    event_window_s=0 schaltet die Fenster-Priorisierung ab (negRisk zuerst,
+    dann reine Volumen-Sortierung).
     """
     out: list[str] = []
     seen: set[str] = set()
@@ -413,68 +458,201 @@ def stream_tokens(snap: MarketSnapshot, cap: int,
                 seen.add(t)
                 out.append(t)
 
-    def in_event_window(m: Market) -> bool:
-        return (event_window_s > 0 and m.end_ts is not None
-                and m.end_ts - now <= event_window_s)
-
+    expiring: list[Market] = []
+    rest: list[Market] = []
+    for m in snap.markets:
+        left = None if m.end_ts is None else m.end_ts - now
+        if left is not None and left <= min_time_to_end_s:
+            continue  # praktisch abgelaufen — Abo wäre totes Budget
+        if event_window_s > 0 and left is not None and left <= event_window_s:
+            expiring.append(m)
+        else:
+            rest.append(m)
+    for m in sorted(expiring, key=lambda m: m.end_ts):
+        if len(out) + 2 > cap:
+            break
+        add(m.yes_token, m.no_token)
     for ev_markets in snap.negrisk_events.values():
         if len(out) + 2 * len(ev_markets) > cap:
             continue
         for m in ev_markets:
             add(m.yes_token, m.no_token)
-    for m in sorted(snap.markets,
-                    key=lambda m: (not in_event_window(m), -m.volume_24h)):
+    for m in sorted(rest, key=lambda m: -m.volume_24h):
         if len(out) + 2 > cap:
             break
         add(m.yes_token, m.no_token)
     return out
 
 
-def stream_loop(cfg: BotConfig, snap: MarketSnapshot, strategies,
+class SnapshotWorker(threading.Thread):
+    """Hintergrund-Thread: REST-Refresh (build_snapshot) im Doppelpuffer.
+
+    build_snapshot blockiert live 39-52s (Gamma-Pagination + Batch-Preise) —
+    im alten Ein-Thread-Design war die Engine damit 56% der Wanduhrzeit blind
+    (Messbefund 05.07.2026). Deshalb baut dieser Worker die Snapshots
+    parallel und tauscht sie atomar ein (Lock + Referenz-Swap); der
+    Inner-Stream-Loop liest über snapshot() immer den letzten FERTIGEN
+    Snapshot und läuft ununterbrochen weiter.
+
+    Robustheit: Fehler beim Aufbau werden geloggt und mit exponentiellem
+    Backoff erneut versucht — der alte Snapshot bleibt bis dahin gültig.
+    Nach jedem frischen Snapshot rotiert der Worker das WSS-Abo
+    (stream_tokens). Der Thread ist daemon: ein KeyboardInterrupt im
+    Hauptthread beendet den Prozess sauber, ohne auf einen laufenden
+    REST-Refresh warten zu müssen.
+    """
+
+    def __init__(self, cfg: BotConfig, gamma: GammaClient, books: BookClient,
+                 fees: FeeRateCache, streamer=None,
+                 initial_backoff_s: float = 2.0, max_backoff_s: float = 60.0,
+                 min_sleep_s: float = 1.0):
+        super().__init__(name="SnapshotWorker", daemon=True)
+        self.cfg = cfg
+        self.gamma = gamma
+        self.books = books
+        self.fees = fees
+        self.streamer = streamer
+        self.initial_backoff_s = initial_backoff_s
+        self.max_backoff_s = max_backoff_s
+        # Mindestpause zwischen zwei Refreshes: auch wenn der Aufbau länger
+        # als poll_interval_s dauert, keine lückenlose Anfragekette gegen die
+        # API (Rate-Limit-Schutz — wie der 1s-Mindest-Sleep im alten Loop).
+        self.min_sleep_s = min_sleep_s
+        self._lock = threading.Lock()
+        self._snap: MarketSnapshot | None = None
+        self._version = 0
+        self._stop = threading.Event()
+
+    def snapshot(self) -> tuple[MarketSnapshot | None, int]:
+        """Letzter fertiger Snapshot + Versionszähler (atomar gelesen).
+
+        None, solange noch kein erster Aufbau gelungen ist. Die Version
+        erlaubt dem Leser zu erkennen, ob ein Snapshot FRISCH ist (voller
+        REST-Tick fällig) oder nur der bekannte alte.
+        """
+        with self._lock:
+            return self._snap, self._version
+
+    def stop(self) -> None:
+        """Worker beenden (weckt auch eine laufende Wartepause)."""
+        self._stop.set()
+
+    def refresh_once(self) -> bool:
+        """Einen Snapshot bauen und atomar eintauschen; True bei Erfolg.
+
+        Ein Fehlschlag lässt den alten Snapshot unangetastet — der
+        Inner-Loop arbeitet dann einfach mit dem letzten guten Stand weiter.
+        """
+        try:
+            snap = build_snapshot(self.cfg, self.gamma, self.books, self.fees)
+        except Exception as e:  # noqa: BLE001 — Worker darf nie sterben
+            log.error("Snapshot-Aufbau fehlgeschlagen: %s — alter Snapshot "
+                      "bleibt gültig", e)
+            return False
+        with self._lock:
+            self._snap = snap
+            self._version += 1
+        if self.streamer is not None:
+            # Abo auf die Kandidaten des frischen Snapshots rotieren.
+            # subscribe ist eine reine Zustandsänderung, zur Sicherheit
+            # trotzdem abgeschirmt (der Swap oben ist da schon passiert).
+            try:
+                self.streamer.subscribe(stream_tokens(
+                    snap, self.cfg.strategy.stream_max_tokens,
+                    event_window_s=self.cfg.strategy.stream_event_window_s,
+                    min_time_to_end_s=self.cfg.strategy.min_time_to_end_s))
+            except Exception as e:  # noqa: BLE001
+                log.warning("WSS-Abo-Rotation fehlgeschlagen: %s", e)
+        return True
+
+    def _cycle(self, backoff: float) -> tuple[float, float]:
+        """Ein Refresh-Durchlauf; liefert (Wartezeit, nächster Backoff)."""
+        started = time.time()
+        if self.refresh_once():
+            elapsed = time.time() - started
+            if elapsed > self.cfg.poll_interval_s:
+                log.warning("Snapshot-Aufbau dauerte %.1fs > Intervall %.1fs — "
+                            "der Stream-Loop läuft zwar weiter, aber die "
+                            "REST-Sicht altert; max_markets/max_negrisk_events "
+                            "senken oder Intervall erhöhen",
+                            elapsed, self.cfg.poll_interval_s)
+            return (max(self.min_sleep_s, self.cfg.poll_interval_s - elapsed),
+                    self.initial_backoff_s)
+        return backoff, min(backoff * 2, self.max_backoff_s)
+
+    def run(self) -> None:
+        backoff = self.initial_backoff_s
+        while not self._stop.is_set():
+            wait, backoff = self._cycle(backoff)
+            self._stop.wait(wait)
+
+
+def stream_loop(cfg: BotConfig, worker: SnapshotWorker, strategies,
                 risk: RiskManager, broker, portfolio: Portfolio,
-                streamer, deadline: float,
+                streamer,
                 recorder: OpportunityRecorder | None = None,
                 ledger: CycleLedger | None = None,
-                shadow: ShadowTracker | None = None) -> int:
-    """Schneller Inner-Loop zwischen zwei REST-Snapshots.
+                shadow: ShadowTracker | None = None) -> None:
+    """Endloser Inner-Loop gegen den Doppelpuffer des SnapshotWorkers.
 
-    Prüft alle stream_tick_s NUR die live gestreamten Bücher (über die
-    REST-Bücher des letzten Snapshots gelegt) gegen die Strategien — kein
-    einziger REST-Call. Liefert der Stream nichts (leer/tot), kehrt die
-    Funktion sofort zurück und der Aufrufer schläft den Rest des Intervalls
-    wie im reinen REST-Betrieb. KillSwitch propagiert, alle anderen Fehler
-    beenden nur den Inner-Loop (Robustheit: der Stream darf nie crashen).
+    Läuft UNUNTERBROCHEN — der REST-Refresh passiert parallel im Worker,
+    hier wird nur dessen letzter fertiger Snapshot gelesen (kein
+    Blindfenster mehr, kein Deadline-Konstrukt). Pro Iteration:
+
+    - Frischer Snapshot (Version gewechselt): voller Tick + Statuszeile.
+    - Sonst alle stream_tick_s NUR die live gestreamten Bücher (über die
+      REST-Bücher gelegt) gegen die Strategien — kein einziger REST-Call.
+      Liefert der Stream nichts (leer/tot/kein Streamer), wird bis zum
+      nächsten frischen Snapshot nur geschlafen (reiner REST-Betrieb).
+
+    KillSwitch propagiert (stoppt den ganzen Bot), alle anderen Tick- und
+    Streamer-Fehler werden geloggt und überlebt.
     """
-    fills = 0
     interval = cfg.strategy.stream_tick_s
-    while time.time() + interval <= deadline:
+    last_version = 0
+    while True:
+        snap, version = worker.snapshot()
+        if snap is None:
+            # Noch kein erster Snapshot fertig (oder Worker im Fehler-Backoff).
+            time.sleep(interval)
+            continue
+        fresh = version != last_version
+        last_version = version
+        streamed: dict[str, OrderBook] = {}
+        if streamer is not None:
+            try:
+                streamed = streamer.get_books(list(snap.books))
+            except Exception as e:  # noqa: BLE001 — Streamer-Fehler nie durchreichen
+                log.warning("Stream-Bücher nicht lesbar: %s — nur REST-Snapshot", e)
+                streamed = {}
+        if fresh or streamed:
+            fast = MarketSnapshot(markets=snap.markets,
+                                  books={**snap.books, **streamed},
+                                  negrisk_events=snap.negrisk_events,
+                                  events=snap.events,
+                                  fee_rates=snap.fee_rates)
+            got = 0
+            try:
+                got = tick(cfg, fast, strategies, risk, broker, portfolio,
+                           recorder, ledger, shadow)
+            except KillSwitch:
+                raise
+            except Exception as e:  # noqa: BLE001 — Netzwerk/Broker-Fehler überleben
+                log.error("Tick fehlgeschlagen: %s", e)
+            if fresh:
+                marks = {t: b.midpoint for t, b in fast.books.items() if b.midpoint}
+                console.print(
+                    f"[dim]{time.strftime('%H:%M:%S')}[/dim] "
+                    f"Fills: {got} | Wert: {portfolio.value(marks):.2f} USDC | "
+                    f"Tages-PnL: {portfolio.daily_pnl(marks):+.2f} | "
+                    f"Exposure: {portfolio.total_exposure():.2f}"
+                )
+                portfolio.save()
+            elif got:
+                console.print(f"[dim]{time.strftime('%H:%M:%S')}[/dim] "
+                              f"[cyan]Stream-Tick[/cyan] Fills: {got}")
+                portfolio.save()
         time.sleep(interval)
-        try:
-            streamed = streamer.get_books(list(snap.books))
-        except Exception as e:  # noqa: BLE001 — Streamer-Fehler nie durchreichen
-            log.warning("Stream-Bücher nicht lesbar: %s — zurück zu REST", e)
-            return fills
-        if not streamed:
-            return fills
-        fast = MarketSnapshot(markets=snap.markets,
-                              books={**snap.books, **streamed},
-                              negrisk_events=snap.negrisk_events,
-                              events=snap.events,
-                              fee_rates=snap.fee_rates)
-        try:
-            got = tick(cfg, fast, strategies, risk, broker, portfolio, recorder,
-                       ledger, shadow)
-        except KillSwitch:
-            raise
-        except Exception as e:  # noqa: BLE001 — Netzwerk/Broker-Fehler überleben
-            log.error("Stream-Tick fehlgeschlagen: %s", e)
-            return fills
-        if got:
-            fills += got
-            console.print(f"[dim]{time.strftime('%H:%M:%S')}[/dim] "
-                          f"[cyan]Stream-Tick[/cyan] Fills: {got}")
-            portfolio.save()
-    return fills
 
 
 def cmd_scan(cfg: BotConfig) -> None:
@@ -552,58 +730,22 @@ def cmd_run(cfg: BotConfig) -> None:
             log.warning("BookStreamer nicht startbar: %s — reines REST-Polling", e)
             streamer = None
 
-    snap: MarketSnapshot | None = None
+    # Doppelpuffer-Architektur: der REST-Refresh (build_snapshot, live
+    # 39-52s) läuft im SnapshotWorker-Thread; der Inner-Loop hier im
+    # Hauptthread tickt ununterbrochen gegen den letzten fertigen Snapshot
+    # (plus Stream-Overlay) — die alte 56%-Blindzeit entfällt.
+    worker = SnapshotWorker(cfg, gamma, books, fees, streamer=streamer)
+    worker.start()
     try:
-        while True:
-            started = time.time()
-            try:
-                snap = build_snapshot(cfg, gamma, books, fees)
-                if streamer is not None:
-                    # Abo auf die Kandidaten des frischen Snapshots rotieren —
-                    # reine Zustandsänderung, wirft nicht.
-                    streamer.subscribe(stream_tokens(
-                        snap, cfg.strategy.stream_max_tokens,
-                        event_window_s=cfg.strategy.stream_event_window_s))
-                fills = tick(cfg, snap, strategies, risk, broker, portfolio,
-                             recorder, ledger, shadow)
-                marks = {t: b.midpoint for t, b in snap.books.items() if b.midpoint}
-                console.print(
-                    f"[dim]{time.strftime('%H:%M:%S')}[/dim] "
-                    f"Fills: {fills} | Wert: {portfolio.value(marks):.2f} USDC | "
-                    f"Tages-PnL: {portfolio.daily_pnl(marks):+.2f} | "
-                    f"Exposure: {portfolio.total_exposure():.2f}"
-                )
-            except KillSwitch as e:
-                console.print(f"[bold red]{e}[/bold red]")
-                break
-            except Exception as e:  # noqa: BLE001 — Netzwerkfehler etc. überleben
-                log.error("Tick fehlgeschlagen: %s", e)
-            finally:
-                portfolio.save()
-            elapsed = time.time() - started
-            if elapsed > cfg.poll_interval_s:
-                log.warning("Tick dauerte %.1fs > Intervall %.1fs — API-Last zu hoch, "
-                            "max_markets/max_negrisk_events senken oder Intervall erhöhen",
-                            elapsed, cfg.poll_interval_s)
-            deadline = started + cfg.poll_interval_s
-            if streamer is not None and snap is not None:
-                # Bis zum nächsten REST-Snapshot die gestreamten Bücher prüfen;
-                # bei leerem/totem Stream kehrt der Loop sofort zurück.
-                try:
-                    stream_loop(cfg, snap, strategies, risk, broker,
-                                portfolio, streamer, deadline, recorder,
-                                ledger, shadow)
-                except KillSwitch as e:
-                    console.print(f"[bold red]{e}[/bold red]")
-                    portfolio.save()
-                    break
-            # Mindestens 1s schlafen: auch bei Überlauf keine lückenlose
-            # Anfragekette gegen die API (Rate-Limit-Schutz).
-            time.sleep(max(1.0, deadline - time.time()))
+        stream_loop(cfg, worker, strategies, risk, broker, portfolio,
+                    streamer, recorder, ledger, shadow)
+    except KillSwitch as e:
+        console.print(f"[bold red]{e}[/bold red]")
     except KeyboardInterrupt:
         console.print("Gestoppt. Portfolio gespeichert.")
-        portfolio.save()
     finally:
+        portfolio.save()
+        worker.stop()  # daemon-Thread: kein Join auf laufenden REST-Refresh nötig
         if streamer is not None:
             streamer.stop()
 

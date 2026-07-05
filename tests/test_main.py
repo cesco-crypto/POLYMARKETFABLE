@@ -6,6 +6,7 @@ import polybot.main as main
 from polybot.config import BotConfig
 from polybot.data.fees import FeeRateCache
 from polybot.data.gamma import Market
+from polybot.risk import KillSwitch
 from polybot.strategies.base import MarketSnapshot
 
 
@@ -139,11 +140,10 @@ class NullLedger:
 
 
 class FakeTime:
-    """time-Ersatz: jeder time()-Aufruf springt 30s vor -> Tick-Überlauf."""
+    """time-Ersatz: jeder time()-Aufruf springt 30s vor -> Refresh-Überlauf."""
 
     def __init__(self):
         self.now = 0.0
-        self.sleeps: list[float] = []
 
     def time(self):
         self.now += 30.0
@@ -152,21 +152,53 @@ class FakeTime:
     def strftime(self, fmt):
         return "00:00:00"
 
-    def sleep(self, s):
-        self.sleeps.append(s)
-        raise KeyboardInterrupt  # Loop nach dem ersten Durchlauf beenden
 
-
-def test_cmd_run_warnt_bei_tick_ueberlauf_und_schlaeft_mindestens_1s(monkeypatch, caplog):
-    # Regressionstest: dauerte ein Tick länger als poll_interval_s, klemmte
-    # der Sleep stillschweigend auf 0 — Busy-Loop gegen die API ohne Warnung.
+def test_worker_warnt_bei_refresh_ueberlauf_und_wartet_mindestens_1s(monkeypatch, caplog):
+    # Regressionstest (Nachfolger des alten Tick-Überlauf-Tests): dauert der
+    # REST-Refresh länger als poll_interval_s, muss der Worker warnen und
+    # trotzdem mindestens 1s pausieren — keine lückenlose Anfragekette gegen
+    # die API (Rate-Limit-Schutz).
     monkeypatch.setattr(main, "time", FakeTime())
+    monkeypatch.setattr(main, "build_snapshot",
+                        lambda *a, **kw: MarketSnapshot())
+    cfg = BotConfig()  # poll_interval_s=10, Refresh "dauert" 30s
+    worker = main.SnapshotWorker(cfg, None, None, None)
+    with caplog.at_level(logging.WARNING, logger="polybot"):
+        wait, backoff = worker._cycle(worker.initial_backoff_s)
+    assert wait == 1.0
+    assert backoff == worker.initial_backoff_s  # Erfolg -> Backoff zurückgesetzt
+    assert "Snapshot-Aufbau dauerte" in caplog.text
+    assert worker.snapshot()[1] == 1  # der Snapshot wurde trotzdem getauscht
+
+
+def test_worker_fehler_backoff_waechst_exponentiell(monkeypatch, caplog):
+    # Worker-Fehler crashen den Bot nicht: _cycle liefert die Backoff-Wartezeit,
+    # der Backoff verdoppelt sich bis zum Deckel, Snapshot/Version unverändert.
+    monkeypatch.setattr(main, "build_snapshot",
+                        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("Gamma down")))
+    cfg = BotConfig()
+    worker = main.SnapshotWorker(cfg, None, None, None,
+                                 initial_backoff_s=2.0, max_backoff_s=5.0)
+    with caplog.at_level(logging.ERROR, logger="polybot"):
+        assert worker._cycle(2.0) == (2.0, 4.0)
+        assert worker._cycle(4.0) == (4.0, 5.0)
+        assert worker._cycle(5.0) == (5.0, 5.0)  # Deckel
+    assert "alter Snapshot bleibt gültig" in caplog.text
+    assert worker.snapshot() == (None, 0)
+
+
+def test_cmd_run_stoppt_kompletten_bot_bei_killswitch(monkeypatch):
+    # KillSwitch aus tick() (Tagesverlustgrenze) muss durch den endlosen
+    # Inner-Loop propagieren und cmd_run beenden — trotz Worker-Thread.
     monkeypatch.setattr(main, "Portfolio", StubPortfolio)
     monkeypatch.setattr(main, "CycleLedger", NullLedger)
-    monkeypatch.setattr(main, "build_snapshot", lambda cfg, g, b: MarketSnapshot())
-    monkeypatch.setattr(main, "tick", lambda *a, **kw: 0)
-    cfg = BotConfig()  # poll_interval_s=10, Tick "dauert" 30s
-    with caplog.at_level(logging.WARNING, logger="polybot"):
-        main.cmd_run(cfg)
-    assert main.time.sleeps == [1.0]
-    assert "Tick dauerte" in caplog.text
+    monkeypatch.setattr(main, "build_snapshot",
+                        lambda *a, **kw: MarketSnapshot())
+
+    def boom(*a, **kw):
+        raise KillSwitch("Tagesverlustgrenze erreicht")
+
+    monkeypatch.setattr(main, "tick", boom)
+    cfg = BotConfig()
+    cfg.strategy.stream_tick_s = 0.001
+    main.cmd_run(cfg)  # kehrt zurück statt endlos weiterzulaufen

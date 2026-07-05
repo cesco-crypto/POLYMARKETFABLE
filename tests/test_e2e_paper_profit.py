@@ -66,6 +66,9 @@ def test_e2e_arbitrage_pipeline_realisiert_gewinn():
     # Volle Pipeline wie main.tick: Strategien -> RiskManager -> PaperBroker
     # -> Merge, frisches Portfolio mit 1000 USDC Start-Cash.
     cfg = BotConfig()  # mode="paper", max_order_usdc=50, min_edge=0.01
+    # Sofort-Fill: der Test prüft die Gewinn-Pipeline in EINEM Tick; der
+    # Latenz-Verzug hat eigene Tests (test_execution).
+    cfg.strategy.paper_fill_delay_ticks = 0
     pf = Portfolio(cash=1000.0)
     strategies = [REGISTRY[n](cfg) for n in ("complement_arb", "negrisk_arb")]
     fills = main.tick(cfg, build_arb_snapshot(), strategies,
@@ -127,6 +130,7 @@ def test_e2e_fok_ein_bein_ohne_tiefe_kein_fill():
     # Arbitrage vorhanden (0.55 + 0.40 < 1), aber das NO-Bein hat nur noch
     # 10 Shares Tiefe -> FOK schlägt fehl, KEIN Bein füllt, Cash unverändert.
     cfg = BotConfig()
+    cfg.strategy.paper_fill_delay_ticks = 0  # hier zählt die FOK-Semantik
     pf = Portfolio(cash=1000.0)
     fills = main.tick(cfg, build_arb_snapshot(no_ask_size=10.0), [StaleSizedArb(cfg)],
                       RiskManager(cfg), PaperBroker(cfg), pf)

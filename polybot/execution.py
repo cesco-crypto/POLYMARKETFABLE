@@ -91,6 +91,16 @@ class PaperBroker(Broker):
     Das Cash ruhender BUYs ist reserviert und steht Sofort-Orders nicht zur
     Verfügung; ein replace-Signal ersetzt die alten Quotes seines Tokens
     (gleiche Semantik wie das Cancel-vor-Neuquote des LiveBrokers).
+
+    Latenz-Verzug (fill_delay_ticks, ehrliche Fill-Simulation): live vergehen
+    zwischen Signal und Order-Ankunft ~250ms (Erkennung + Order-RTT) — ein
+    Fill gegen denselben Snapshot, aus dem das Signal entstand, wäre also
+    systematisch optimistisch. Bei fill_delay_ticks > 0 werden neue Signale
+    deshalb NICHT sofort gefüllt, sondern in eine Pending-Queue gelegt und
+    erst nach so vielen weiteren execute()-Aufrufen gegen das DANN aktuelle
+    Buch geprüft (FOK-Gruppen unverändert atomar: alle Beine gegen das neue
+    Buch, ganz oder gar nicht). 0 = Sofort-Fill (altes Verhalten für
+    Vergleichsmessungen).
     """
 
     def __init__(self, cfg: BotConfig | None = None):
@@ -102,6 +112,14 @@ class PaperBroker(Broker):
         # MAKER_REBATE_SHARE * taker_fee_rate(token); dieser Wert hier ist
         # nur der Fallback ohne bekannte Taker-Rate. Default 0.0 = aus.
         self.maker_rebate_rate = cfg.strategy.maker_rebate_rate if cfg else 0.0
+        # Latenz-Verzug in execute()-Aufrufen (siehe Klassen-Docstring);
+        # ohne Config (Tests) 0 = Sofort-Fill wie bisher.
+        self.fill_delay_ticks = cfg.strategy.paper_fill_delay_ticks if cfg else 0
+        # Pending-Queue wartender Signale: [verbleibende Ticks, Signale].
+        # Bewusst NICHT persistiert — bei einem Neustart verfallen wartende
+        # Signale ersatzlos (live wären diese Orders auch nie rausgegangen,
+        # und ihr Ursprungs-Snapshot ist nach dem Neustart ohnehin stale).
+        self._pending_signals: list[list] = []
 
     def _rebate_rate(self, token_id: str, fee_rates: dict[str, float]) -> float:
         """Maker-Rebate-Rate eines Tokens: 20% seiner Taker-Fee-Rate.
@@ -244,6 +262,30 @@ class PaperBroker(Broker):
 
     def execute(self, signals: list[Signal], books: dict[str, OrderBook], portfolio: Portfolio,
                 fee_rates: dict[str, float] | None = None) -> int:
+        # Latenz-Verzug: zuerst fällige Signale aus der Pending-Queue holen,
+        # neue Signale ggf. einreihen. Gefüllt wird immer gegen das Buch
+        # DIESES Aufrufs — zwischenzeitliche Buchbewegungen treffen die
+        # Simulation damit genauso wie live die verspätet ankommende Order.
+        due: list[Signal] = []
+        waiting: list[list] = []
+        for entry in self._pending_signals:
+            entry[0] -= 1
+            if entry[0] <= 0:
+                due.extend(entry[1])  # FIFO: ältere Signale zuerst
+            else:
+                waiting.append(entry)
+        self._pending_signals = waiting
+        if self.fill_delay_ticks > 0:
+            if signals:
+                self._pending_signals.append([self.fill_delay_ticks, list(signals)])
+        else:
+            due.extend(signals)
+        return self._fill_against_books(due, books, portfolio, fee_rates)
+
+    def _fill_against_books(self, signals: list[Signal], books: dict[str, OrderBook],
+                            portfolio: Portfolio,
+                            fee_rates: dict[str, float] | None = None) -> int:
+        """Signale gegen die übergebenen Bücher füllen (Kernlogik ohne Verzug)."""
         fee_rates = fee_rates or {}
         # Innerhalb dieses Aufrufs bereits konsumierte Buchliquidität je
         # (Token, Seite): spätere Signale sehen nur noch die Restliquidität.

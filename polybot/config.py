@@ -65,6 +65,14 @@ class StrategyConfig:
     # FALLBACK für Tokens ohne bekannte Taker-Rate. Default 0.0 = aus
     # (konservativ: kein simulierter Verdienst, den es live vielleicht nicht gäbe).
     maker_rebate_rate: float = 0.0
+    # Ehrliche Fill-Simulation (Paper): live vergehen zwischen Signal und
+    # Order-Ankunft ~250ms (Erkennung + Order-RTT, Messung 05.07.2026) —
+    # sofortige Paper-Fills gegen denselben Snapshot wären optimistisch.
+    # Marketable Signale warten deshalb so viele execute()-Aufrufe in einer
+    # Pending-Queue und füllen erst gegen das DANN aktuelle Buch (bei ~0.6s
+    # Tick-Kadenz ist 1 Tick ≈ 600ms > 250ms — konservativ).
+    # 0 = Sofort-Fill (altes Verhalten, nur für Vergleichsmessungen).
+    paper_fill_delay_ticks: int = 1
     # Marktauswahl
     min_liquidity_usdc: float = 10_000.0
     min_volume_24h_usdc: float = 5_000.0
@@ -105,11 +113,14 @@ class StrategyConfig:
     stream_max_tokens: int = 500          # Abo-Deckel pro WSS-Verbindung
     # Ereignisfenster fürs Stream-Abo: Binärmärkte, deren endDate innerhalb
     # dieses Fensters liegt (laufende/bald endende Live-Ereignisse: Sport-
-    # spiele, Kurzfrist-Krypto), bekommen im WSS-Abo Vorrang vor reinem
-    # 24h-Volumen. Messbefund 04.07.2026 (WM-Abend): Preisverwerfungen
-    # ballen sich in Live-Fenstern, und das Abo-Budget (stream_max_tokens,
-    # ~500 von ~7000 Tokens) ist dort der Engpass. 0 = aus (nur Volumen).
-    stream_event_window_s: float = 4 * 3600.0
+    # spiele, Esports, Kurzfrist-Krypto), bekommen im WSS-Abo HÖCHSTE
+    # Priorität (vor negRisk und Volumen), aufsteigend nach endDate.
+    # Messbefunde 04./05.07.2026: Preisverwerfungen ballen sich in
+    # Live-Fenstern, und der Profit konzentriert sich auf kurzlebige
+    # Crypto-'Up or Down'-5/15-Min- und Esports-Märkte mit endDate < 2h —
+    # das Abo-Budget (stream_max_tokens) ist dort der Engpass.
+    # 0 = aus (negRisk zuerst, dann nur Volumen).
+    stream_event_window_s: float = 2 * 3600.0
 
 
 @dataclass
@@ -181,6 +192,9 @@ class BotConfig:
                              "(Polymarket-Maximum ist 0.07)")
         if cfg.strategy.mm_max_markets <= 0:
             raise SystemExit("strategy.mm_max_markets muss > 0 sein")
+        if cfg.strategy.paper_fill_delay_ticks < 0:
+            raise SystemExit("strategy.paper_fill_delay_ticks darf nicht negativ "
+                             "sein (0 = Sofort-Fill ohne Latenz-Verzug)")
         if not 0.0 <= cfg.strategy.maker_rebate_rate <= 0.1:
             raise SystemExit("strategy.maker_rebate_rate muss zwischen 0 und 0.1 liegen "
                              "(realistisch sind 20-25% der Taker-Rate, also <= 0.0175)")

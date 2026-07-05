@@ -52,6 +52,7 @@ def test_impliziter_default_liest_config_yaml_im_cwd(tmp_path, monkeypatch):
     "risk:\n  taker_fee_rate: 0.5\n",  # weit über dem Polymarket-Maximum 0.07
     "risk:\n  taker_fee_rate: -0.01\n",
     "strategy:\n  stream_event_window_s: -1\n",  # 0 = aus, negativ = Fehler
+    "strategy:\n  paper_fill_delay_ticks: -1\n",  # 0 = Sofort-Fill, negativ = Fehler
 ])
 def test_unsinnige_werte_werden_abgewiesen(tmp_path, yaml_text):
     p = write_config(tmp_path, yaml_text)
@@ -60,7 +61,16 @@ def test_unsinnige_werte_werden_abgewiesen(tmp_path, yaml_text):
 
 
 def test_stream_event_window_default_und_yaml_ladbar(tmp_path):
-    # Ereignisfenster fürs WSS-Abo: Default 4h, per YAML änderbar (0 = aus).
-    assert BotConfig().strategy.stream_event_window_s == 4 * 3600.0
+    # Ereignisfenster fürs WSS-Abo: Default 2h (Messbefund 05.07.2026 —
+    # Profit lebt in Märkten mit endDate < 2h), per YAML änderbar (0 = aus).
+    assert BotConfig().strategy.stream_event_window_s == 2 * 3600.0
     p = write_config(tmp_path, "strategy:\n  stream_event_window_s: 0\n")
     assert BotConfig.load(p).strategy.stream_event_window_s == 0.0
+
+
+def test_paper_fill_delay_default_und_yaml_ladbar(tmp_path):
+    # Ehrliche Fill-Simulation: Default 1 (Signale füllen erst im Folge-Tick
+    # gegen das dann aktuelle Buch); 0 = altes Sofort-Fill-Verhalten.
+    assert BotConfig().strategy.paper_fill_delay_ticks == 1
+    p = write_config(tmp_path, "strategy:\n  paper_fill_delay_ticks: 0\n")
+    assert BotConfig.load(p).strategy.paper_fill_delay_ticks == 0

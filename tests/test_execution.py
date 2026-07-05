@@ -574,6 +574,7 @@ def test_paperbroker_rebate_wird_gutgeschrieben():
     cfg = BotConfig()
     cfg.risk.taker_fee_rate = 0.0
     cfg.strategy.maker_rebate_rate = 0.01
+    cfg.strategy.paper_fill_delay_ticks = 0  # hier zählt die Rebate-Logik
     broker = PaperBroker(cfg)
     pf = Portfolio(cash=100.0)
     book = OrderBook(token_id="tok", bids=[], asks=[Level(0.60, 50)])
@@ -607,6 +608,7 @@ def test_paperbroker_rebate_tokenspezifisch_20_prozent_der_taker_fee():
     # maker_rebate_rate ist dann irrelevant (nur Fallback).
     cfg = BotConfig()
     cfg.strategy.maker_rebate_rate = 0.0   # Fallback aus — Rebate kommt trotzdem
+    cfg.strategy.paper_fill_delay_ticks = 0  # hier zählt die Rebate-Logik
     broker = PaperBroker(cfg)
     pf = Portfolio(cash=100.0)
     fee_rates = {"tok": 0.05}
@@ -663,9 +665,130 @@ def test_ruhende_orders_und_rebates_ueberleben_neustart(tmp_path):
     assert loaded.reserved_cash == pytest.approx(4.5)
 
 
+# ---- PaperBroker: Latenz-Verzug (paper_fill_delay_ticks) --------------------
+
+def delayed_broker(delay: int = 1) -> PaperBroker:
+    # Gebührenfrei, damit die Tests nur den Verzug messen; der Delay kommt
+    # bewusst über die Config-Plumbing (strategy.paper_fill_delay_ticks).
+    cfg = BotConfig()
+    cfg.risk.taker_fee_rate = 0.0
+    cfg.strategy.paper_fill_delay_ticks = delay
+    return PaperBroker(cfg)
+
+
+def test_paperbroker_delay_default_aus_config_ohne_config_null():
+    # Config-Default 1 (ehrlich); ohne Config (Tests) 0 = altes Verhalten.
+    assert PaperBroker(BotConfig()).fill_delay_ticks == 1
+    assert PaperBroker().fill_delay_ticks == 0
+
+
+def test_paperbroker_delay_fuellt_erst_im_folgetick():
+    # Live vergehen ~250ms zwischen Signal und Order-Ankunft — der Fill darf
+    # deshalb erst im NÄCHSTEN execute() gegen das dann aktuelle Buch passieren.
+    broker = delayed_broker()
+    pf = Portfolio(cash=100.0)
+    book = OrderBook(token_id="tok", bids=[], asks=[Level(0.50, 100)])
+    sig = Signal(token_id="tok", side="BUY", price=0.50, size=10, reason="test")
+    assert broker.execute([sig], {"tok": book}, pf) == 0
+    assert pf.positions == {}
+    assert pf.cash == pytest.approx(100.0)
+    # Folge-Tick (Buch unverändert): jetzt füllt das Signal.
+    assert broker.execute([], {"tok": book}, pf) == 1
+    assert pf.positions["tok"].shares == pytest.approx(10)
+    assert pf.cash == pytest.approx(100.0 - 5.0)
+    assert broker._pending_signals == []
+
+
+def test_paperbroker_delay_preis_weggelaufen_kein_fill():
+    # Zwischen Signal und "Order-Ankunft" ist der Ask über das Limit gestiegen
+    # -> kein Taker-Fill mehr; der ungruppierte Rest ruht als GTC-Quote.
+    broker = delayed_broker()
+    pf = Portfolio(cash=100.0)
+    t0 = OrderBook(token_id="tok", bids=[], asks=[Level(0.50, 100)])
+    sig = Signal(token_id="tok", side="BUY", price=0.50, size=10, reason="test")
+    assert broker.execute([sig], {"tok": t0}, pf) == 0
+    t1 = OrderBook(token_id="tok", bids=[], asks=[Level(0.52, 100)])
+    assert broker.execute([], {"tok": t1}, pf) == 0
+    assert pf.positions == {}
+    assert len(pf.resting_orders) == 1  # GTC-Semantik wie ohne Verzug
+
+
+def test_paperbroker_delay_ausgeduenntes_buch_kleinerer_fill():
+    # Die Buchliquidität ist zwischenzeitlich geschrumpft -> es füllt nur,
+    # was im NEUEN Buch liegt, nicht die Snapshot-Größe von der Signalerzeugung.
+    broker = delayed_broker()
+    pf = Portfolio(cash=100.0)
+    t0 = OrderBook(token_id="tok", bids=[], asks=[Level(0.50, 100)])
+    sig = Signal(token_id="tok", side="BUY", price=0.50, size=10, reason="test")
+    assert broker.execute([sig], {"tok": t0}, pf) == 0
+    t1 = OrderBook(token_id="tok", bids=[], asks=[Level(0.50, 4)])
+    assert broker.execute([], {"tok": t1}, pf) == 1
+    assert pf.positions["tok"].shares == pytest.approx(4)
+
+
+def test_paperbroker_delay_fok_gruppe_fuellt_atomar_im_folgetick():
+    broker = delayed_broker()
+    pf = Portfolio(cash=100.0)
+    books = {"t1": make_book("t1", ask=Level(0.30, 20)),
+             "t2": make_book("t2", ask=Level(0.60, 20))}
+    group = [arb_leg("t1"), arb_leg("t2", price=0.60)]
+    assert broker.execute(group, books, pf) == 0
+    assert pf.positions == {}
+    # Folge-Tick: beide Beine füllen atomar gegen das dann aktuelle Buch.
+    assert broker.execute([], books, pf) == 2
+    assert pf.positions["t1"].shares == pytest.approx(10)
+    assert pf.positions["t2"].shares == pytest.approx(10)
+    assert pf.cash == pytest.approx(100.0 - 3.0 - 6.0)
+
+
+def test_paperbroker_delay_fok_gruppe_kein_bein_bei_verschlechtertem_buch():
+    # Beim Signal war die Gruppe voll füllbar; im Folge-Tick ist Bein t2
+    # ausgedünnt -> FOK gegen das NEUE Buch: KEIN Bein füllt.
+    broker = delayed_broker()
+    pf = Portfolio(cash=100.0)
+    books0 = {"t1": make_book("t1", ask=Level(0.30, 20)),
+              "t2": make_book("t2", ask=Level(0.60, 20))}
+    group = [arb_leg("t1"), arb_leg("t2", price=0.60)]
+    assert broker.execute(group, books0, pf) == 0
+    books1 = {"t1": make_book("t1", ask=Level(0.30, 20)),
+              "t2": make_book("t2", ask=Level(0.60, 4))}  # nur noch 4 von 10
+    assert broker.execute([], books1, pf) == 0
+    assert pf.positions == {}
+    assert pf.cash == pytest.approx(100.0)
+
+
+def test_paperbroker_delay_null_fuellt_sofort_wie_bisher():
+    # 0 = altes Verhalten (Vergleichsmessungen): Fill im selben Aufruf,
+    # nichts landet in der Pending-Queue.
+    broker = delayed_broker(0)
+    pf = Portfolio(cash=100.0)
+    book = OrderBook(token_id="tok", bids=[], asks=[Level(0.50, 100)])
+    sig = Signal(token_id="tok", side="BUY", price=0.50, size=10, reason="test")
+    assert broker.execute([sig], {"tok": book}, pf) == 1
+    assert pf.positions["tok"].shares == pytest.approx(10)
+    assert broker._pending_signals == []
+
+
+def test_paperbroker_delay_ruhende_orders_fuellen_weiter_jeden_tick():
+    # _match_resting läuft unabhängig vom Verzug in JEDEM execute():
+    # eine bereits ruhende Quote füllt sofort beim Preisdurchgang.
+    broker = delayed_broker()
+    pf = Portfolio(cash=100.0)
+    book = OrderBook(token_id="tok", bids=[Level(0.40, 50)], asks=[Level(0.50, 50)])
+    quote = Signal(token_id="tok", side="BUY", price=0.45, size=10, reason="MM Bid")
+    broker.execute([quote], {"tok": book}, pf)   # wartet in der Queue
+    broker.execute([], {"tok": book}, pf)        # nicht marketable -> ruht jetzt
+    assert len(pf.resting_orders) == 1
+    crossed = OrderBook(token_id="tok", bids=[Level(0.40, 50)], asks=[Level(0.44, 50)])
+    assert broker.execute([], {"tok": crossed}, pf) == 1
+    assert pf.positions["tok"].shares == pytest.approx(10)
+
+
 def test_paperbroker_fallback_fee_rate_aus_config():
     # Ohne abrufbare Fee-Rate gilt konservativ das konfigurierte Maximum.
-    broker = PaperBroker(BotConfig())  # taker_fee_rate=0.07
+    cfg = BotConfig()  # taker_fee_rate=0.07
+    cfg.strategy.paper_fill_delay_ticks = 0  # hier zählt die Gebührenlogik
+    broker = PaperBroker(cfg)
     pf = Portfolio(cash=100.0)
     book = OrderBook(token_id="tok", bids=[], asks=[Level(0.50, 100)])
     sig = Signal(token_id="tok", side="BUY", price=0.50, size=10, reason="test")
