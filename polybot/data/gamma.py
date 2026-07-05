@@ -219,31 +219,41 @@ class GammaClient:
                 time.sleep(wait)
         raise AssertionError("unerreichbar")  # Schleife returned oder raist immer
 
+    # Live-Befunde zum Token-Lookup (Verifikations-Flotte 05.07.2026):
+    # (a) Komma-verbundene IDs in EINEM clob_token_ids-Parameter lehnt der
+    #     Server ab 2 IDs deterministisch mit HTTP 422 ab — korrekt ist das
+    #     WIEDERHOLTE Param-Format (clob_token_ids=a&clob_token_ids=b, bei
+    #     requests: Wert als Liste übergeben).
+    # (b) Ohne limit-Parameter kappt der Server bei 20 Zeilen — deshalb
+    #     Chunks von 20 IDs mit explizitem limit.
+    # (c) Ohne closed-Parameter kommen NUR offene Märkte — geschlossene
+    #     brauchen einen zweiten Abruf mit closed=true.
+    TOKEN_LOOKUP_CHUNK = 20
+
     def markets_by_tokens(self, token_ids: list[str]) -> list[Market]:
         """Märkte zu CLOB-Token-IDs auflösen — auch bereits geschlossene.
 
-        Anwendungsfall Waisen-Detektor: Altbestände im Portfolio, deren
-        Märkte längst aus dem Scan gefallen sind (beendet, in-play
-        gefiltert). Live-Befund: /markets?clob_token_ids=… liefert ohne
-        closed-Parameter NUR offene Märkte — geschlossene brauchen einen
-        zweiten Abruf mit closed=true. Fehler werden geloggt und liefern
-        das bis dahin Gefundene (der Aufrufer versucht es später erneut).
+        Anwendungsfälle: Waisen-Detektor (Altbestände ohne Paar-Wissen) und
+        Settlement-Sweeper (Auflösungsstatus des gesamten Inventars).
+        Fehler werden geloggt und liefern das bis dahin Gefundene (die
+        Aufrufer versuchen es gedrosselt erneut).
         """
-        ids = ",".join(str(t) for t in token_ids if t)
-        if not ids:
-            return []
+        ids = [str(t) for t in token_ids if t]
         out: dict[str, Market] = {}
-        for extra in ({}, {"closed": "true"}):
-            try:
-                rows = self._get("/markets", clob_token_ids=ids, **extra)
-            except requests.RequestException as e:
-                log.warning("Gamma-Token-Lookup fehlgeschlagen (%s): %s",
-                            extra or "offen", e)
-                continue
-            for row in rows or []:
-                m = _parse_market(row)
-                if m:
-                    out.setdefault(m.condition_id, m)
+        for i in range(0, len(ids), self.TOKEN_LOOKUP_CHUNK):
+            chunk = ids[i:i + self.TOKEN_LOOKUP_CHUNK]
+            for extra in ({}, {"closed": "true"}):
+                try:
+                    rows = self._get("/markets", clob_token_ids=chunk,
+                                     limit=len(chunk), **extra)
+                except requests.RequestException as e:
+                    log.warning("Gamma-Token-Lookup fehlgeschlagen (%s): %s",
+                                extra or "offen", e)
+                    continue
+                for row in rows or []:
+                    m = _parse_market(row)
+                    if m:
+                        out.setdefault(m.condition_id, m)
         return list(out.values())
 
     def active_markets(self, min_liquidity: float = 0.0, limit: int = 500) -> list[Market]:

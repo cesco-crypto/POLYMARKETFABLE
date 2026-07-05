@@ -309,6 +309,32 @@ def test_markets_by_tokens_fragt_offen_und_geschlossen_ab():
     assert len(ms) == 1 and ms[0].closed and ms[0].yes_token == "t1"
 
 
+def test_markets_by_tokens_listenformat_chunking_und_limit():
+    """Verifikations-Flotte 05.07.: Komma-verbundene IDs -> HTTP 422; der
+    Server verlangt das WIEDERHOLTE Param-Format (Liste), kappt ohne limit
+    bei 20 Zeilen -> Chunks von 20 mit explizitem limit. Dieser Test prüft
+    die tatsächlich erzeugten Parameter, damit Fakes den Regressionsfall
+    nie wieder verdecken."""
+    from polybot.data.gamma import GammaClient
+
+    calls = []
+
+    class FakeGamma(GammaClient):
+        def _get(self, path, **params):
+            calls.append(params)
+            return []
+
+    tokens = [f"t{i}" for i in range(45)]  # -> Chunks 20/20/5
+    FakeGamma().markets_by_tokens(tokens)
+    open_calls = [c for c in calls if "closed" not in c]
+    assert [len(c["clob_token_ids"]) for c in open_calls] == [20, 20, 5]
+    for c in open_calls:
+        assert isinstance(c["clob_token_ids"], list)  # NIE komma-joinen (422!)
+        assert c["limit"] == len(c["clob_token_ids"])
+    # Jeder Chunk läuft offen UND geschlossen.
+    assert len(calls) == 6
+
+
 def test_markets_by_tokens_leere_liste_macht_keinen_request():
     from polybot.data.gamma import GammaClient
 
