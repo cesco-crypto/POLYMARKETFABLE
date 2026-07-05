@@ -6,6 +6,7 @@
   python -m polybot.main status          # Paper-Portfolio anzeigen
   python -m polybot.main report          # Opportunity-Log auswerten (--target)
   python -m polybot.main cycle-report    # kompakte Zyklus-Selbstauswertung
+  python -m polybot.main capture-report  # Live/Paper-Schattenvergleich auswerten
 """
 
 from __future__ import annotations
@@ -30,6 +31,8 @@ from polybot.execution import make_broker
 from polybot.portfolio import Portfolio
 from polybot.recorder import (OpportunityRecorder, aggregate,
                               load_opportunities, required_capital)
+from polybot.shadow import (DEFAULT_SHADOW_PATH, ShadowTracker,
+                            aggregate_capture, load_shadow)
 from polybot.risk import KillSwitch, RiskManager
 from polybot.strategies import REGISTRY
 from polybot.strategies.base import MarketSnapshot
@@ -336,7 +339,8 @@ def live_merge_positions(snap: MarketSnapshot, portfolio: Portfolio, merger,
 def tick(cfg: BotConfig, snap: MarketSnapshot, strategies, risk: RiskManager,
          broker, portfolio: Portfolio,
          recorder: OpportunityRecorder | None = None,
-         ledger: CycleLedger | None = None) -> int:
+         ledger: CycleLedger | None = None,
+         shadow: ShadowTracker | None = None) -> int:
     snap.portfolio = portfolio  # Inventar-Sicht für Strategien (Market Making)
     # Marks (Midpoints) für den Kill-Switch: ohne sie wären unrealisierte
     # Verluste unsichtbar. Prüfung VOR der Ausführung, damit im Breach-Tick
@@ -353,7 +357,18 @@ def tick(cfg: BotConfig, snap: MarketSnapshot, strategies, risk: RiskManager,
     approved = risk.filter(signals, portfolio)
     if signals and not approved:
         log.debug("%d Signale erzeugt, alle vom Risk-Manager abgelehnt", len(signals))
+    # Für den Schattenvergleich: Live-Fills dieses Ticks sind genau die
+    # Portfolio-Fills, die broker.execute gleich anhängt.
+    fills_before = len(portfolio.fills)
     fills = broker.execute(approved, snap.books, portfolio, snap.fee_rates)
+    if shadow is not None and cfg.mode == "live":
+        # Live/Paper-Schattenvergleich: dieselben freigegebenen Signale gegen
+        # dieselben Bücher im Paper-Lauf simulieren und pro Signal die
+        # Capture-Quote protokollieren. Nur im Live-Modus sinnvoll (im
+        # Paper-Modus wäre der Schatten identisch zum Lauf selbst); crasht
+        # nie den Tick (siehe ShadowTracker.observe).
+        shadow.observe(approved, snap.books, portfolio.fills[fills_before:],
+                       snap.fee_rates, snap=snap)
     if cfg.mode != "live":
         # Paper-Modus: frisch gefüllte Arb-Paare/Sets sofort zu USDC mergen —
         # live läuft dasselbe als on-chain Merge (siehe unten).
@@ -416,7 +431,8 @@ def stream_loop(cfg: BotConfig, snap: MarketSnapshot, strategies,
                 risk: RiskManager, broker, portfolio: Portfolio,
                 streamer, deadline: float,
                 recorder: OpportunityRecorder | None = None,
-                ledger: CycleLedger | None = None) -> int:
+                ledger: CycleLedger | None = None,
+                shadow: ShadowTracker | None = None) -> int:
     """Schneller Inner-Loop zwischen zwei REST-Snapshots.
 
     Prüft alle stream_tick_s NUR die live gestreamten Bücher (über die
@@ -444,7 +460,7 @@ def stream_loop(cfg: BotConfig, snap: MarketSnapshot, strategies,
                               fee_rates=snap.fee_rates)
         try:
             got = tick(cfg, fast, strategies, risk, broker, portfolio, recorder,
-                       ledger)
+                       ledger, shadow)
         except KillSwitch:
             raise
         except Exception as e:  # noqa: BLE001 — Netzwerk/Broker-Fehler überleben
@@ -515,6 +531,10 @@ def cmd_run(cfg: BotConfig) -> None:
     # alle 90 Minuten frisch, die Fenster-Metriken brauchen deshalb Disk-State.
     ledger = CycleLedger()
     ledger.record_start(portfolio)
+    # Live/Paper-Schattenvergleich (nur Live-Modus): pro Signal wird der
+    # Live-Fill gegen einen Paper-Schattenlauf gemessen (data/shadow.jsonl);
+    # Auswertung: python -m polybot.main capture-report
+    shadow = ShadowTracker(cfg) if cfg.mode == "live" else None
 
     # WebSocket-Streaming (optional): scheitert der Start (z.B. fehlende
     # Bibliothek), läuft der Bot unverändert im reinen REST-Betrieb weiter.
@@ -542,7 +562,7 @@ def cmd_run(cfg: BotConfig) -> None:
                         snap, cfg.strategy.stream_max_tokens,
                         event_window_s=cfg.strategy.stream_event_window_s))
                 fills = tick(cfg, snap, strategies, risk, broker, portfolio,
-                             recorder, ledger)
+                             recorder, ledger, shadow)
                 marks = {t: b.midpoint for t, b in snap.books.items() if b.midpoint}
                 console.print(
                     f"[dim]{time.strftime('%H:%M:%S')}[/dim] "
@@ -568,7 +588,8 @@ def cmd_run(cfg: BotConfig) -> None:
                 # bei leerem/totem Stream kehrt der Loop sofort zurück.
                 try:
                     stream_loop(cfg, snap, strategies, risk, broker,
-                                portfolio, streamer, deadline, recorder, ledger)
+                                portfolio, streamer, deadline, recorder,
+                                ledger, shadow)
                 except KillSwitch as e:
                     console.print(f"[bold red]{e}[/bold red]")
                     portfolio.save()
@@ -742,10 +763,74 @@ def cmd_cycle_report(cfg: BotConfig, now: float | None = None,
     return report
 
 
+def cmd_capture_report(cfg: BotConfig,
+                       shadow_path: str | Path = DEFAULT_SHADOW_PATH) -> dict | None:
+    """Live/Paper-Schattenvergleich auswerten: die echte Capture-Quote.
+
+    Liest data/shadow.jsonl (vom ShadowTracker im Live-Modus geschrieben)
+    und zeigt: Capture-Quote gesamt / pro Strategie / pro Stunde plus die
+    ehrliche Hochrechnung 'Paper-Rate x Capture = Live-Erwartung'.
+    Rückgabe: das Aggregat-Dict (None ohne Daten).
+    """
+    rows = load_shadow(shadow_path)
+    if not rows:
+        console.print(f"[yellow]Keine Schattenvergleichs-Daten in {shadow_path} — "
+                      "die schreibt nur ein Lauf im Live-Modus "
+                      "('python -m polybot.main run' mit mode: live).[/yellow]")
+        return None
+    agg = aggregate_capture(rows)
+
+    def fmt_ts(ts: float) -> str:
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(ts))
+
+    def fmt_capture(b: dict) -> str:
+        if b["capture"] is None:
+            return "—"
+        return f"{b['capture'] * 100:.1f}%"
+
+    hours = agg["duration_s"] / 3600
+    console.print(f"[bold]Capture-Report[/bold] {fmt_ts(agg['first_ts'])} — "
+                  f"{fmt_ts(agg['last_ts'])} UTC ({hours:.2f} h, "
+                  f"{agg['n_records']} Signal-Datensätze)")
+    o = agg["overall"]
+    console.print(f"[bold]Capture gesamt:[/bold] {fmt_capture(o)} "
+                  f"(Paper {o['paper_notional']:.2f} USDC Notional gefüllt, "
+                  f"live {o['live_notional']:.2f})")
+
+    table = Table(title="Capture pro Strategie")
+    for col in ("Strategie", "Signale", "Paper (USDC)", "Live (USDC)", "Capture"):
+        table.add_column(col, justify="right" if col != "Strategie" else "left")
+    for name, b in sorted(agg["by_strategy"].items()):
+        table.add_row(name, str(b["n"]), f"{b['paper_notional']:.2f}",
+                      f"{b['live_notional']:.2f}", fmt_capture(b))
+    console.print(table)
+
+    ht = Table(title="Capture pro Stunde (UTC)")
+    for col in ("Stunde", "Signale", "Paper (USDC)", "Live (USDC)", "Capture"):
+        ht.add_column(col, justify="right" if col != "Stunde" else "left")
+    for hour, b in agg["by_hour"].items():
+        ht.add_row(hour, str(b["n"]), f"{b['paper_notional']:.2f}",
+                   f"{b['live_notional']:.2f}", fmt_capture(b))
+    console.print(ht)
+
+    # Die ehrliche Hochrechnung: gemessene Paper-Rate x gemessene Capture.
+    if agg["live_edge_per_day"] is not None:
+        console.print(
+            f"[bold]Hochrechnung:[/bold] Bei gemessener Paper-Rate "
+            f"{agg['paper_edge_per_day']:.2f} USDC/Tag und Capture "
+            f"{o['capture'] * 100:.1f}% wären das "
+            f"{agg['live_edge_per_day']:.2f} USDC/Tag live.")
+    else:
+        console.print("[yellow]Hochrechnung nicht möglich — Zeitraum zu kurz "
+                      "(< 2 Zeitpunkte) oder noch kein Paper-Fill gemessen.[/yellow]")
+    return agg
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="polybot")
     parser.add_argument("command",
-                        choices=["scan", "run", "status", "report", "cycle-report"])
+                        choices=["scan", "run", "status", "report",
+                                 "cycle-report", "capture-report"])
     # default=None: BotConfig.load unterscheidet so zwischen explizit gesetztem
     # --config (Datei MUSS existieren) und implizitem config.yaml-Fallback.
     parser.add_argument("--config", default=None)
@@ -763,7 +848,8 @@ def main() -> None:
         cmd_report(cfg, target=args.target)
         return
     {"scan": cmd_scan, "run": cmd_run, "status": cmd_status,
-     "cycle-report": cmd_cycle_report}[args.command](cfg)
+     "cycle-report": cmd_cycle_report,
+     "capture-report": cmd_capture_report}[args.command](cfg)
 
 
 if __name__ == "__main__":

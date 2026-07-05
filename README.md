@@ -78,6 +78,39 @@ Seit dem Exchange-Upgrade vom 28.04.2026 nutzt Polymarket V2-Contracts mit
 pUSD als Collateral — dieser Bot verwendet dafür den offiziellen
 `py-clob-client-v2`.
 
+## Go-Live-Checkliste
+
+Der Reihe nach, kein Schritt überspringbar. Paper-Ergebnisse sind eine
+Obergrenze, keine Prognose — live konkurriert der Bot um dieselbe
+Buchliquidität, die er im Paper-Modus einfach zugeteilt bekommt.
+
+1. **Rechtslage klären.** Polymarket steht in der Schweiz auf der
+   GESPA-Sperrliste; VPN-Umgehung verstößt gegen die ToS. Wer das nicht
+   sauber geklärt hat, hört hier auf
+   (siehe [docs/POLYMARKET_GUIDELINES.md](docs/POLYMARKET_GUIDELINES.md)).
+2. **Wallet & Approvals.** Eigenes Wallet nur für den Bot, pUSD
+   (`0xC011…2DFB`) und POL für Gas auf Polygon. Approvals für CTF Exchange V2,
+   NegRisk Exchange V2 und NegRisk Adapter setzen. Nur Geld einzahlen, dessen
+   Totalverlust verkraftbar ist.
+3. **`.env` einrichten.** `POLY_PRIVATE_KEY` (bei Website-Konto zusätzlich
+   `POLY_FUNDER_ADDRESS`, `POLY_SIGNATURE_TYPE=2`). Den Key nirgendwo
+   committen; `mode: live` erst in einer separaten Config setzen.
+4. **Mit Mikro-Limits starten.** `max_order_usdc` einstellig,
+   `daily_loss_limit_usdc` niedrig, `max_total_exposure_usdc` klein. Die
+   ersten Stunden zuschauen, nicht laufen lassen und weggehen.
+5. **Nach 24h `capture-report` bewerten.** Im Live-Modus läuft automatisch
+   ein Paper-Schatten mit (`data/shadow.jsonl`): dieselben Signale gegen
+   dieselben Bücher, Vergleich Live-Fill vs. Paper-Fill pro Signal.
+   `python -m polybot.main capture-report` zeigt die echte Capture-Quote
+   (gesamt / pro Strategie / pro Stunde) und rechnet ehrlich hoch:
+   Paper-Rate × Capture = Live-Erwartung. Liegt die Capture-Quote nahe 0,
+   ist die gemessene Paper-Rate live wertlos — dann nicht skalieren, sondern
+   Ursache suchen (Latenz, Konkurrenz, Orderrouting).
+6. **Erst dann skalieren.** Limits schrittweise erhöhen, nach jeder Stufe
+   erneut 24h messen. Fällt die Capture-Quote beim Skalieren, ist die eigene
+   Ordergröße der Markt-Impact — das ist die reale Kapazitätsgrenze, kein
+   Konfigurationsfehler.
+
 ## Tests
 
 ```bash
@@ -96,7 +129,8 @@ polybot/
 ├── risk.py              # Limits + Kill-Switch
 ├── execution.py         # PaperBroker (Simulation) / LiveBroker (v2-Client)
 ├── portfolio.py         # Positionen, PnL, Persistenz
-└── main.py              # CLI: scan | run | status
+├── shadow.py            # Live/Paper-Schattenvergleich (Capture-Quote)
+└── main.py              # CLI: scan | run | status | report | cycle-report | capture-report
 docs/
 └── POLYMARKET_GUIDELINES.md  # Forensische Recherche der Polymarket-Regeln
 ```
