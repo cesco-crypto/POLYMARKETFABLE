@@ -259,15 +259,17 @@ def test_mm_quotes_tragen_replace_flag():
 
 # ---- Geschärftes Market Making: Marktauswahl & passive Preissetzung --------
 
-def test_mm_quotet_1_tick_hinter_dem_touch():
-    # Nie aggressiv: Bid 1 Tick UNTER dem besten Bid, Ask 1 Tick ÜBER dem
-    # besten Ask — jeder Fill ist damit garantiert ein Maker-Fill.
+def test_mm_quotet_am_touch_ohne_zu_kreuzen():
+    # "Join the Touch" (Iteration 05.07.2026: 1 Tick dahinter ergab 3.5h lang
+    # null Fills): Bid AUF dem besten Bid, Ask AUF dem besten Ask — vorne in
+    # der Schlange, aber weiterhin reine Maker-Orders (bid < ask, kreuzt nie).
     pf = Portfolio()
     pf.apply_fill(Fill(ts=0, token_id="yes1", side="BUY", price=0.50, size=10, reason=""))
     signals = MarketMaking(BotConfig()).generate(mm_snapshot(pf))
     by_side = {s.side: s for s in signals}
-    assert by_side["BUY"].price == pytest.approx(0.48)   # best_bid 0.49 - 0.01
-    assert by_side["SELL"].price == pytest.approx(0.52)  # best_ask 0.51 + 0.01
+    assert by_side["BUY"].price == pytest.approx(0.49)   # = best_bid
+    assert by_side["SELL"].price == pytest.approx(0.51)  # = best_ask
+    assert by_side["BUY"].price < by_side["SELL"].price  # kreuzt nie
 
 
 def test_mm_ueberspringt_weiten_spread():

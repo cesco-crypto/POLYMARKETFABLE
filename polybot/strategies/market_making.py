@@ -71,11 +71,15 @@ class MarketMaking(Strategy):
             if spread > s.mm_spread + 1e-9:
                 continue  # weiter Spread = illiquide/unsicher bepreist — auslassen
 
-            # Nie aggressiv: mindestens 1 Tick hinter dem Touch quoten —
-            # garantiert Maker-Fills und kreuzt mathematisch nie die
-            # Gegenseite (Bid < Best-Bid < Best-Ask < Ask).
-            bid_px = round(book.best_bid.price - TICK, 3)
-            ask_px = round(book.best_ask.price + TICK, 3)
+            # "Join the Touch": auf Höhe von Best-Bid/Best-Ask quoten — immer
+            # noch reine Maker-Orders (kreuzen nie: bid = Best-Bid < Best-Ask
+            # = ask), aber vorne in der Schlange statt dahinter. Messbefund
+            # 05.07.2026: 1 Tick HINTER dem Touch ergab in 3.5h Paper-Betrieb
+            # null Fills — zu passiv, die konservative Fill-Regel (Fill erst
+            # bei Preisdurchgang) verlangt ohnehin, dass der Markt durch
+            # unser Level läuft.
+            bid_px = round(book.best_bid.price, 3)
+            ask_px = round(book.best_ask.price, 3)
             if not (0.0 < bid_px and ask_px < 1.0):
                 continue
             size = s.mm_size_usdc / max(mid, 0.05)
