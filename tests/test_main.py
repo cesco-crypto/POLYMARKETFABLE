@@ -94,7 +94,7 @@ class StubPortfolio:
     def load(cls, path="paper_state.json", start_cash=1000.0):
         return cls()
 
-    def save(self):
+    def save(self, path=None):
         pass
 
     def value(self, marks=None):

@@ -592,7 +592,8 @@ def stream_loop(cfg: BotConfig, worker: SnapshotWorker, strategies,
                 streamer,
                 recorder: OpportunityRecorder | None = None,
                 ledger: CycleLedger | None = None,
-                shadow: ShadowTracker | None = None) -> None:
+                shadow: ShadowTracker | None = None,
+                state_path: str = "paper_state.json") -> None:
     """Endloser Inner-Loop gegen den Doppelpuffer des SnapshotWorkers.
 
     Läuft UNUNTERBROCHEN — der REST-Refresh passiert parallel im Worker,
@@ -647,11 +648,11 @@ def stream_loop(cfg: BotConfig, worker: SnapshotWorker, strategies,
                     f"Tages-PnL: {portfolio.daily_pnl(marks):+.2f} | "
                     f"Exposure: {portfolio.total_exposure():.2f}"
                 )
-                portfolio.save()
+                portfolio.save(state_path)
             elif got:
                 console.print(f"[dim]{time.strftime('%H:%M:%S')}[/dim] "
                               f"[cyan]Stream-Tick[/cyan] Fills: {got}")
-                portfolio.save()
+                portfolio.save(state_path)
         time.sleep(interval)
 
 
@@ -690,8 +691,11 @@ def cmd_run(cfg: BotConfig) -> None:
     # wenn Gamma die Fee-Info eines Markts in einem Tick nicht mitliefert.
     fees = FeeRateCache()
     # start_cash greift nur beim ERSTEN Anlegen (kein State auf Disk) —
-    # ein bestehendes paper_state.json behält sein Cash.
-    portfolio = Portfolio.load(start_cash=cfg.risk.paper_start_cash)
+    # ein bestehender State behält sein Cash. Live und Paper führen strikt
+    # GETRENNTE State-Dateien: ein parallel laufender Paper-Messbot darf
+    # niemals dieselbe Datei beschreiben wie die Live-Buchhaltung.
+    state_path = "live_state.json" if cfg.mode == "live" else "paper_state.json"
+    portfolio = Portfolio.load(state_path, start_cash=cfg.risk.paper_start_cash)
     broker = make_broker(cfg)
     risk = RiskManager(cfg)
     unknown = [n for n in cfg.strategy.enabled if n not in REGISTRY]
@@ -738,13 +742,13 @@ def cmd_run(cfg: BotConfig) -> None:
     worker.start()
     try:
         stream_loop(cfg, worker, strategies, risk, broker, portfolio,
-                    streamer, recorder, ledger, shadow)
+                    streamer, recorder, ledger, shadow, state_path=state_path)
     except KillSwitch as e:
         console.print(f"[bold red]{e}[/bold red]")
     except KeyboardInterrupt:
         console.print("Gestoppt. Portfolio gespeichert.")
     finally:
-        portfolio.save()
+        portfolio.save(state_path)
         worker.stop()  # daemon-Thread: kein Join auf laufenden REST-Refresh nötig
         if streamer is not None:
             streamer.stop()

@@ -25,3 +25,4 @@ build/
 paper_state.json
 paper_state.fills.jsonl
 paper_state.tmp
+live_state.json

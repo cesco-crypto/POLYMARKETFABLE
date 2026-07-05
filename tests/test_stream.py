@@ -402,7 +402,7 @@ class FakeWorker:
 
 
 class StubPortfolio:
-    def save(self):
+    def save(self, path=None):
         pass
 
     def value(self, marks=None):
