@@ -164,6 +164,17 @@ def _expiring_tokens(markets: list[Market], window_s: float,
     return out
 
 
+def _market_ok(m: Market, s) -> bool:
+    """Gemeinsamer Handelbarkeits-Filter für den Snapshot.
+
+    (a) endDate-Filter (Phantom-Arbitragen, Befund 04.07.2026) und
+    (b) In-play-Matching-Delay-Filter (ungehedgte Beine, Befund 05.07.2026).
+    """
+    if not m.tradeable(s.min_time_to_end_s):
+        return False
+    return not (s.skip_delayed_inplay and m.inplay_delayed())
+
+
 def _implication_candidates(
     cfg: BotConfig, gamma: GammaClient,
     negrisk: dict[str, list[Market]],
@@ -187,7 +198,7 @@ def _implication_candidates(
         return {}, set()
     events: dict[str, list[Market]] = {}
     for slug, ms in raw.items():
-        ms = [m for m in ms if m.tradeable(s.min_time_to_end_s)]
+        ms = [m for m in ms if _market_ok(m, s)]
         if len(ms) >= 2:
             events[slug] = ms
     merged = dict(negrisk)
@@ -218,12 +229,12 @@ def build_snapshot(cfg: BotConfig, gamma: GammaClient, books: BookClient,
     # nach endDate closed=False und ein stales, real nicht handelbares Buch
     # (abgelaufene 15-Min-Krypto-Fenster, beendete Spiele) — ohne diesen
     # Filter entstehen Phantom-Arbitragen im Paper-PnL und Live-Rejects.
-    markets = [m for m in markets if m.tradeable(s.min_time_to_end_s)]
+    markets = [m for m in markets if _market_ok(m, s)]
     negrisk = gamma.negrisk_events(min_liquidity=s.min_liquidity_usdc)
     # Ein Event ist nur handelbar, wenn ALLE Teilmärkte noch laufen —
     # sonst wäre das Bündel unvollständig.
     negrisk = {slug: ms for slug, ms in negrisk.items()
-               if all(m.tradeable(s.min_time_to_end_s) for m in ms)}
+               if all(_market_ok(m, s) for m in ms)}
     # Ohne Deckel würden die Bücher ALLER negRisk-Teilmärkte geladen (live
     # ~5000 Tokens -> ein Tick dauert länger als poll_interval_s): Events mit
     # zu vielen Teilmärkten überspringen (dort fehlt fast immer ein Buch und

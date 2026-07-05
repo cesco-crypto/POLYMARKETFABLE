@@ -256,3 +256,32 @@ def test_get_gibt_nicht_transiente_fehler_sofort_weiter(monkeypatch):
     with pytest.raises(requests.HTTPError):
         gc._get("/markets")  # noqa: SLF001
     assert session.calls == 1
+
+
+# ---- In-play-Matching-Delay (Live-Befund 05.07.2026) -----------------------
+
+def test_parse_market_liest_delay_und_spielbeginn():
+    from polybot.data.gamma import _parse_market
+    m = _parse_market({
+        "conditionId": "0xabc", "question": "q", "slug": "s",
+        "clobTokenIds": '["1","2"]', "liquidityNum": 100,
+        "secondsDelay": 5, "gameStartTime": "2026-07-05 12:40:00+00",
+    })
+    assert m.seconds_delay == 5
+    from datetime import datetime, timezone
+    expected = datetime(2026, 7, 5, 12, 40, tzinfo=timezone.utc).timestamp()
+    assert m.game_start_ts == pytest.approx(expected)
+
+
+def test_inplay_delayed_nur_nach_spielbeginn_und_mit_delay():
+    from polybot.data.gamma import Market
+    kw = dict(condition_id="c", question="q", slug="s", yes_token="1",
+              no_token="2", liquidity=0, volume_24h=0, neg_risk=False)
+    start = 1_000_000.0
+    m = Market(**kw, seconds_delay=5, game_start_ts=start)
+    assert not m.inplay_delayed(now=start - 60)   # Spiel noch nicht gestartet
+    assert m.inplay_delayed(now=start + 60)       # in-play + Delay -> meiden
+    assert not Market(**kw, seconds_delay=0,
+                      game_start_ts=start).inplay_delayed(now=start + 60)
+    assert not Market(**kw, seconds_delay=5,
+                      game_start_ts=None).inplay_delayed(now=start + 60)

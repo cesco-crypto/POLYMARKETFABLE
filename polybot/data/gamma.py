@@ -50,12 +50,28 @@ class Market:
     # Endzeit-Filter entstehen Phantom-Arbitragen (12%+ des Fill-Volumens
     # im ersten Messlauf).
     end_ts: float | None = None
+    # In-play-Matching-Delay (Sport/Esports): Sekunden, die eine Order nach
+    # Spielbeginn serverseitig verzögert gematcht wird; Spielbeginn als
+    # Unix-Timestamp (None = kein Spiel-Markt).
+    seconds_delay: float = 0.0
+    game_start_ts: float | None = None
 
     def tradeable(self, min_time_to_end_s: float, now: float | None = None) -> bool:
         """Bleibt bis zum Marktende genug Zeit, um real zu handeln?"""
         if self.end_ts is None:
             return True  # kein endDate geliefert -> nicht aussortieren
         return self.end_ts - (now if now is not None else time.time()) > min_time_to_end_s
+
+    def inplay_delayed(self, now: float | None = None) -> bool:
+        """Läuft das Spiel bereits UND matcht der Markt nur mit Verzögerung?
+
+        Live-Befund 05.07.2026: In diesem Zustand hängen Taker-Orders
+        sekundenlang im Matching-Delay — für Arbitrage ist der Edge dann
+        eine Fata Morgana (Cancel-Races, ungehedgte Beine).
+        """
+        if self.seconds_delay <= 0 or self.game_start_ts is None:
+            return False
+        return (now if now is not None else time.time()) >= self.game_start_ts
 
 
 def _parse_fee_rate(m: dict) -> float | None:
@@ -80,15 +96,28 @@ def _parse_fee_rate(m: dict) -> float | None:
     return rate if 0.0 <= rate <= 1.0 else None
 
 
-def _parse_end_ts(m: dict) -> float | None:
-    """endDate (ISO-8601, z.B. '2026-07-04T21:00:00Z') als Unix-Timestamp."""
-    raw = m.get("endDate") or m.get("endDateIso")
+def _parse_ts(raw) -> float | None:
+    """Zeitstempel-String als Unix-Timestamp.
+
+    Gamma liefert zwei Formate: ISO-8601 ('2026-07-04T21:00:00Z') und bei
+    gameStartTime '2026-07-05 20:00:00+00' (Leerzeichen, Kurz-Offset).
+    """
     if not raw:
         return None
+    text = str(raw).strip().replace("Z", "+00:00")
+    # Kurz-Offset '+00'/'-05' auf '+00:00' normalisieren (fromisoformat
+    # älterer Python-Versionen scheitert daran).
+    if len(text) >= 3 and text[-3] in "+-" and text[-2:].isdigit():
+        text += ":00"
     try:
-        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
+        return datetime.fromisoformat(text).timestamp()
     except ValueError:
         return None
+
+
+def _parse_end_ts(m: dict) -> float | None:
+    """endDate (ISO-8601, z.B. '2026-07-04T21:00:00Z') als Unix-Timestamp."""
+    return _parse_ts(m.get("endDate") or m.get("endDateIso"))
 
 
 def _parse_market(m: dict) -> Market | None:
@@ -110,6 +139,8 @@ def _parse_market(m: dict) -> Market | None:
             neg_risk_augmented=bool(m.get("negRiskAugmented", False)),
             fee_rate=_parse_fee_rate(m),
             end_ts=_parse_end_ts(m),
+            seconds_delay=float(m.get("secondsDelay") or 0),
+            game_start_ts=_parse_ts(m.get("gameStartTime")),
         )
     except (ValueError, TypeError, json.JSONDecodeError):
         return None

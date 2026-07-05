@@ -72,3 +72,24 @@ def test_build_snapshot_sammelt_tokens_aus_maerkten_und_events():
     assert set(books.requested) == {"yes1", "no1", "yes10", "no10", "yes11", "no11"}
     # Jedes Token genau einmal (keine doppelten Book-Requests)
     assert len(books.requested) == 6
+
+
+def test_market_ok_filtert_inplay_delay():
+    from polybot.config import BotConfig
+    from polybot.data.gamma import Market
+    from polybot.main import _market_ok
+    import time as _t
+    s = BotConfig().strategy
+    assert s.skip_delayed_inplay is True  # Default: meiden
+    now = _t.time()
+    kw = dict(condition_id="c", question="q", slug="s", yes_token="1",
+              no_token="2", liquidity=0, volume_24h=0, neg_risk=False,
+              end_ts=now + 3600)
+    live_delayed = Market(**kw, seconds_delay=5, game_start_ts=now - 60)
+    pre_game = Market(**kw, seconds_delay=5, game_start_ts=now + 600)
+    no_delay = Market(**kw, seconds_delay=0, game_start_ts=now - 60)
+    assert not _market_ok(live_delayed, s)
+    assert _market_ok(pre_game, s)
+    assert _market_ok(no_delay, s)
+    s.skip_delayed_inplay = False
+    assert _market_ok(live_delayed, s)

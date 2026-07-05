@@ -97,6 +97,13 @@ class StrategyConfig:
     # Bücher stale und untradeable (Validierungs-Befund 04.07.2026) — und
     # kurz vor dem Ende ist das Auflösungs-/Reject-Risiko am höchsten.
     min_time_to_end_s: float = 120.0
+    # In-play-Märkte mit Matching-Delay (Sport/Esports nach Spielbeginn,
+    # secondsDelay > 0) für Taker-Strategien meiden. Live-Befund 05.07.2026:
+    # das erste Arb-Bein hängt dort sekundenlang im Delay, bis es füllt, ist
+    # der Preis des Gegenbeins im Live-Spiel weg -> ungehedgtes Bein bzw.
+    # Unwind-Verluste statt Arbitrage. Gilt für Paper UND Live, damit die
+    # Paper-Rate nichts zählt, was real nicht einfangbar ist.
+    skip_delayed_inplay: bool = True
     # negRisk-Auswahl: ohne Deckel würden die Orderbücher ALLER Events geladen
     # (live gemessen ~70 Events / ~5000 Tokens -> ein Tick dauert länger als
     # poll_interval_s). Nur die Top-N Events nach Summen-Liquidität behalten;
