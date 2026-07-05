@@ -395,7 +395,8 @@ def tick(cfg: BotConfig, snap: MarketSnapshot, strategies, risk: RiskManager,
          ledger: CycleLedger | None = None,
          shadow: ShadowTracker | None = None,
          flattener: OrphanFlattener | None = None,
-         sweeper: SettlementSweeper | None = None) -> int:
+         sweeper: SettlementSweeper | None = None,
+         syncer: PositionSyncer | None = None) -> int:
     snap.portfolio = portfolio  # Inventar-Sicht für Strategien (Market Making)
     # Marks (Midpoints) für den Kill-Switch: ohne sie wären unrealisierte
     # Verluste unsichtbar. Prüfung VOR der Ausführung, damit im Breach-Tick
@@ -435,6 +436,10 @@ def tick(cfg: BotConfig, snap: MarketSnapshot, strategies, risk: RiskManager,
         merger = getattr(broker, "merger", None)
         if merger is not None:
             live_merge_positions(snap, portfolio, merger, ledger)
+    if syncer is not None:
+        # Periodischer Chain-Abgleich (Downtime-Fills, manuelle Eingriffe);
+        # intern gedrosselt und mit Lag-Schonfrist, crasht nie.
+        syncer.periodic(portfolio)
     if sweeper is not None:
         # Resolution-Sweeper (Kapital-Deadlock-Fix): Positionen final
         # aufgelöster Märkte zur Auszahlung ausbuchen — sonst wächst das
@@ -633,7 +638,8 @@ def stream_loop(cfg: BotConfig, worker: SnapshotWorker, strategies,
                 shadow: ShadowTracker | None = None,
                 state_path: str = "paper_state.json",
                 flattener: OrphanFlattener | None = None,
-                sweeper: SettlementSweeper | None = None) -> None:
+                sweeper: SettlementSweeper | None = None,
+                syncer: PositionSyncer | None = None) -> None:
     """Endloser Inner-Loop gegen den Doppelpuffer des SnapshotWorkers.
 
     Läuft UNUNTERBROCHEN — der REST-Refresh passiert parallel im Worker,
@@ -675,7 +681,8 @@ def stream_loop(cfg: BotConfig, worker: SnapshotWorker, strategies,
             got = 0
             try:
                 got = tick(cfg, fast, strategies, risk, broker, portfolio,
-                           recorder, ledger, shadow, flattener, sweeper)
+                           recorder, ledger, shadow, flattener, sweeper,
+                           syncer)
             except KillSwitch:
                 raise
             except Exception as e:  # noqa: BLE001 — Netzwerk/Broker-Fehler überleben
@@ -737,15 +744,20 @@ def cmd_run(cfg: BotConfig) -> None:
     state_path = "live_state.json" if cfg.mode == "live" else "paper_state.json"
     portfolio = Portfolio.load(state_path, start_cash=cfg.risk.paper_start_cash)
     broker = make_broker(cfg)
+    syncer = None
     if cfg.mode == "live":
         # Buchhaltung an die Chain-Wahrheit angleichen (Fills während
         # Downtime, manuelle Eingriffe) — NACH make_broker, damit dessen
         # Start-cancel_all keine In-flight-Orders mehr offen lässt.
+        # Der Syncer bleibt danach aktiv (periodisch im Tick, 15-Min-Takt
+        # mit Lag-Schonfrist) und fängt so auch das Start-Race ein, wenn
+        # ein Delayed-Match erst Sekunden nach dem ersten Sync indiziert wird.
         addr = cfg.funder_address or getattr(
             getattr(broker, "client", None), "get_address", lambda: None)()
         if addr:
+            syncer = PositionSyncer(addr)
             try:
-                PositionSyncer(addr).sync(portfolio)
+                syncer.sync(portfolio)
                 portfolio.save(state_path)
             except Exception as e:  # noqa: BLE001 — Sync nie startkritisch
                 log.error("Positions-Sync fehlgeschlagen: %s — Buchhaltung "
@@ -807,7 +819,7 @@ def cmd_run(cfg: BotConfig) -> None:
     try:
         stream_loop(cfg, worker, strategies, risk, broker, portfolio,
                     streamer, recorder, ledger, shadow, state_path=state_path,
-                    flattener=flattener, sweeper=sweeper)
+                    flattener=flattener, sweeper=sweeper, syncer=syncer)
     except KillSwitch as e:
         console.print(f"[bold red]{e}[/bold red]")
     except KeyboardInterrupt:

@@ -55,11 +55,16 @@ class SettlementSweeper:
         Intervall erneut versucht.
         """
         now = time.time() if now is None else now
-        if now - self._last_sweep < self.interval_s or not portfolio.positions:
+        # Auch Tokens ruhender Orders prüfen: Quotes auf aufgelösten Märkten
+        # binden sonst für immer Cash-Reservierung (Befund 3/22).
+        tokens = set(portfolio.positions) | {o.token_id
+                                             for o in portfolio.resting_orders}
+        tokens -= set(portfolio.settled)  # nie doppelt auszahlen (Befund 2/20)
+        if now - self._last_sweep < self.interval_s or not tokens:
             return 0.0
         self._last_sweep = now
         try:
-            markets = self.gamma.markets_by_tokens(list(portfolio.positions))
+            markets = self.gamma.markets_by_tokens(sorted(tokens))
         except Exception as e:  # noqa: BLE001 — Sweep nie tick-kritisch
             log.warning("Settlement-Sweep: Gamma-Lookup fehlgeschlagen: %s", e)
             return 0.0
@@ -70,7 +75,7 @@ class SettlementSweeper:
                 continue
             for token, payout_per_share in ((m.yes_token, payouts[0]),
                                             (m.no_token, payouts[1])):
-                if token not in portfolio.positions:
+                if token not in tokens:
                     continue
                 before = portfolio.realized_pnl
                 paid = portfolio.settle_position(token, payout_per_share,

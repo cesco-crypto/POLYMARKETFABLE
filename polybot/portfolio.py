@@ -71,6 +71,13 @@ class Portfolio:
     # Ruhende Paper-Orders (GTC-Quotes) — persistiert, damit sie einen
     # Neustart überleben; das Cash ruhender BUYs gilt als reserviert.
     resting_orders: list[RestingOrder] = field(default_factory=list)
+    # Bereits GESETTELTE Tokens (Token -> Settlement-Zeitpunkt), persistiert:
+    # Schutz gegen Doppel-Settlement nach Neustart (Verifikations-Befund 2/20:
+    # der Positions-Sync sähe die noch nicht redeemten Chain-Tokens sonst als
+    # "fehlend", trüge sie neu ein, und der Sweeper zahlte ERNEUT aus —
+    # Phantom-Cash bei jedem 90-Min-Neustart). Einträge werden vom Sync
+    # entfernt, sobald die Chain den Token nicht mehr führt (Redeem durch).
+    settled: dict[str, float] = field(default_factory=dict)
     day_start_date: str = field(default_factory=_utc_today)  # UTC-Kalendertag
     # None = "beim Start setzen": wird in __post_init__ an den tatsächlichen
     # Startwert gekoppelt, damit Portfolio(cash=X) nicht sofort PnL zeigt.
@@ -165,6 +172,16 @@ class Portfolio:
         Rückgabe: ausgezahlte USDC (0.0 wenn Position nicht existiert).
         """
         pos = self.positions.get(token_id)
+        self.settled[token_id] = datetime.now(timezone.utc).timestamp()
+        # Ruhende Orders auf dem aufgelösten Markt sind tot — entfernen,
+        # sonst bleibt ihre Cash-Reservierung für immer gebunden
+        # (Verifikations-Befund 3/22: schleichender Rest-Deadlock).
+        before_resting = len(self.resting_orders)
+        self.resting_orders = [o for o in self.resting_orders
+                               if o.token_id != token_id]
+        if len(self.resting_orders) != before_resting:
+            log.info("Settlement: %d ruhende Order(s) auf %s entfernt",
+                     before_resting - len(self.resting_orders), token_id[:16])
         if pos is None or pos.shares <= 1e-9:
             return 0.0
         payout = pos.shares * payout_per_share
@@ -308,6 +325,7 @@ class Portfolio:
             "day_start_date": self.day_start_date,
             "day_start_value": self.day_start_value,
             "positions": {k: asdict(v) for k, v in self.positions.items()},
+            "settled": dict(self.settled),
             "fills": [asdict(f) for f in self.fills],
             "resting_orders": [asdict(o) for o in self.resting_orders],
         }
@@ -340,6 +358,7 @@ class Portfolio:
             day_start_value=data.get("day_start_value", start_cash),
         )
         pf.positions = {k: Position(**v) for k, v in data.get("positions", {}).items()}
+        pf.settled = dict(data.get("settled", {}))
         pf.fills = [Fill(**f) for f in data.get("fills", [])]
         pf.resting_orders = [RestingOrder(**o) for o in data.get("resting_orders", [])]
         pf._fills_flushed = len(pf.fills)  # geladene Fills stehen schon auf Disk

@@ -174,3 +174,30 @@ def test_resolved_payouts_50_50_split():
     sw = SettlementSweeper(FakeGamma([market(prices=(0.5, 0.5))]))
     assert sw.sweep(pf, now=T0) == pytest.approx(5.0)
     assert pf.positions == {}
+
+
+def test_sweep_cancelt_ruhende_orders_auf_aufgeloestem_markt():
+    """Befund 3/22: ruhende BUY-Quoten toter Märkte binden sonst für immer
+    Cash-Reservierung."""
+    from polybot.portfolio import RestingOrder
+
+    pf = Portfolio(cash=100.0)
+    pf.resting_orders.append(RestingOrder(ts=T0, token_id="yes1", side="BUY",
+                                          price=0.5, size=10, reason="MM Bid"))
+    assert pf.reserved_cash == pytest.approx(5.0)
+    SettlementSweeper(FakeGamma([market(prices=(1.0, 0.0))])).sweep(pf, now=T0)
+    assert pf.reserved_cash == 0.0
+    assert pf.resting_orders == []
+
+
+def test_sweep_settelt_denselben_token_nie_doppelt():
+    """Befund 2/20: Registry verhindert Doppel-Auszahlung."""
+    pf = pf_with(buy("yes1", 10, price=0.4))
+    gamma = FakeGamma([market(prices=(1.0, 0.0))])
+    sw = SettlementSweeper(gamma)
+    assert sw.sweep(pf, now=T0) == pytest.approx(10.0)
+    # Position kommt (z.B. per Sync-Fehler) zurück — Registry blockt.
+    pf.positions["yes1"] = type(pf).load.__self__ if False else None
+    from polybot.portfolio import Position
+    pf.positions["yes1"] = Position(token_id="yes1", shares=10, cost_basis=4.0)
+    assert sw.sweep(pf, now=T0 + sw.SWEEP_INTERVAL_S + 1) == 0.0
