@@ -20,6 +20,7 @@ build/
 # Laufzeitdaten (nur im Repo-Root — polybot/data/ ist Quellcode!)
 /data/
 /logs/
+/scratchpad_updown/   # temporäre Recorder-Logs/Helfer, kein Deliverable
 *.sqlite
 *.db
 paper_state.json
