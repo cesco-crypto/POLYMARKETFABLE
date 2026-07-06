@@ -455,3 +455,47 @@ Fenster (auch nach 7% Fee), aber auf 15 Fenstern und dünn. NICHT handeln.
 Recorder weiterlaufen lassen für eine belastbare Stichprobe (Ziel: >100
 Fenster), dann entscheiden, ob die 250ms-Ausführungsrealität den Edge
 überlebt.
+
+## Up/Down — 45-Fenster-Stichprobe (06.07.2026 ~22:25 UTC), nach 7% Fee
+
+Signal jetzt = **Median aus Coinbase+Kraken+Binance.us**; zusätzlich
+Chainlink-on-chain als Divergenz-Spalte. Die 15-Fenster-Euphorie ist
+**korrigiert** — die «100% bei T-30s» waren Kleinststichprobe:
+
+| ≤ Sek. | Fenster | proxy_acc | Ø Ask | Ø Rendite/Share | Median≈Chain |
+|---|---|---|---|---|---|
+| 7s  | 14 | 73.7% | 0.749 | **-0.015** | 81% |
+| 10s | 17 | 83.1% | 0.797 | **+0.030** | 80% |
+| 15s | 30 | 92.6% | 0.888 | **+0.034** | 62% |
+| 20s | 32 | 94.7% | 0.893 | **+0.049** | 62% |
+| 30s | 43 | 92.7% | 0.872 | **+0.049** | 78% |
+| 45s | 41 | 75.3% | 0.838 | **-0.093** | 87% |
+| 60s | 38 | 71.3% | 0.830 | **-0.126** | 95% |
+
+**Ehrliche Lesart:**
+1. **Handelbares +EV-Fenster: T-10 bis T-30s**, ~+0.03 bis +0.05/Share nach
+   Fee, getragen von 83-95% Trefferquote. Süßester Punkt T-20..30s
+   (proxy_acc ~93-95%, EV ~+0.05, Tiefe 220-490 Shares). Auf 30-43 Fenstern
+   — kein Rauschen mehr, aber immer noch ~2h EINER Tageszeit.
+2. **Vor T-45s: klar NEGATIV** (-0.09..-0.13). Zu früh, die Richtung dreht
+   noch. **Bei T≤7s: negativ/verrauscht** — Selektionseffekt: dort bietet nur
+   noch das Buch der UNSICHEREN Fenster einen billigen Ask (klare Fenster
+   sind schon auf ~1 gelaufen), also ist der Proxy dort fast zufällig.
+3. **Der Edge ist DÜNN.** Bei T-20s: Kauf zu 0.89, gewinnt 94.7% → +0.05.
+   Zwei Punkte Trefferquote oder zwei Cent Slippage weniger, und er ist weg.
+4. **Median≈Chain enttäuscht als Kennzahl** (62-95%, unruhig): der on-chain-
+   Aggregator (~15-30s Heartbeat) hat sich im Fenster oft noch nicht bewegt
+   → scheinbare «Divergenz», die real nur Chainlink-Lag ist. Die
+   VERTRAUENSWÜRDIGE Zahl bleibt **proxy_acc** (Median vs echte Auflösung).
+   Der on-chain-Aggregator taugt NICHT als Sekundensignal — nur als grobe
+   Zweitsicht.
+
+**Antwort auf «ist der Bot nutzbar?»:** Auf Papier ja — ein reales, dünnes
++EV-Signal in T-10..30s, ~5 Cent/Share bei ~93% Treffer, ohne Chainlink-
+Insiderwissen nachbaubar (Median-Spot reicht). ABER: die Rendite steht VOR
+Slippage/Order-Latenz. Ob die ~5 Cent die Ausführungsrealität überleben, ist
+die nächste — und entscheidende — Messung: **echte Order-Round-Trip-Latenz
+auf genau diesen Märkten** (FOK-Take, acceptingOrders=True). Erst wenn nach
+Latenz/Slippage netto positiv bleibt, ist es eine Kapital-Skalierungsfrage.
+Bis dahin: weiter messen (Ziel >100 Fenster über verschiedene Stunden),
+NICHT handeln.
