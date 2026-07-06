@@ -270,3 +270,38 @@ Unwind-Teilfüllungs-Warnung.
   fängt Überzeichnung); Batch-Redeem für das Deposit-Wallet ist der
   nächste Ausbau, wenn die Capture-Messung läuft.
 - Kein Heartbeat-Alerting — Betriebsüberwachung bleibt manuell (Log).
+
+---
+
+## Latenz- & Mess-Optimierungen (06.07.2026): 4 von 5 deployed
+
+Flotten-Analyse (X-Thread-Ideen eines erfahrenen Bot-Builders gegen
+UNSERE Messdaten verifiziert; die reinen X-Feed-Fixes wie Delta-Reject
+feuerten in 569k Events 0x und wurden verworfen). Was gebaut wurde:
+
+1. **CLOB-Keep-Alive** (execution.py): Verbindung stirbt nach ~5s Leerlauf
+   — gemessen 475-698ms kalt vs. 131-153ms warm. 4s-Heartbeat-Daemon
+   (get_ok) hält sie warm. Grösster Einzelhebel gegen das Race.
+2. **Tick-Size-Prewarm** (SnapshotWorker -> LiveBroker.prewarm_ticks):
+   get_tick_size (~145ms/Bein) vorab in den Client-Cache, off Hot Path.
+   Spart ~290ms je Arb-Gruppe im Order-Bau.
+3. **Mess-Sizing** (config.live): max_order 20->6, position 60->20,
+   exposure 150->80 — der Kill-Switch (-30/Tag) überlebt so einen ganzen
+   Capture-Messtag mit Race-Verlusten.
+4. **Recorder-Sampling**: Negativ-Edge-Rauschen (99.994% der Zeilen) 1:500,
+   damit die Messdaten nicht in ~8.5h wegrotieren.
+
+**Bewusst NICHT deployed — P5 (FOK-Beine parallel posten):** Spart nur die
+restlichen ~145ms des zweiten Beins (P3+P4 holen ~850ms der ~1.0-1.8s),
+erfordert aber entweder nebenläufige Portfolio-Mutation (nicht thread-safe)
+oder einen Umbau der sicherheitskritischen _submit_signal-Zweige. Kommt als
+eigener, verifizierter Schritt NACH dem ersten Capture-Datenpunkt — kein
+riskanter Execution-Umbau ohne Messung.
+
+**Ehrliche 48h-Erwartung:** Diese Fixes bringen KEINE +1000/Tag. Ihr Wert
+ist, die Live-Capture-Quote von strukturell-0 auf messbar-positiv zu heben
+(54-69% der Gelegenheiten leben <0.5-2s — ohne Latenzcut nicht greifbar).
+Direkter USDC-Effekt: +0 bis +25/Tag an Mikro-Limits. Der Weg zu 1000
+bleibt: Capture messen (jetzt möglich) -> Grösse skalieren -> Pool per
+Maker-Bein erweitern. 1000/Tag ist ein Meilenstein über Wochen, kein
+Schalter.
