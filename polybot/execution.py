@@ -593,6 +593,8 @@ class LiveBroker(Broker):
         self._hb_thread = threading.Thread(
             target=self._heartbeat_loop, name="clob-keepalive", daemon=True)
         self._hb_thread.start()
+        # Tokens, deren Tick-Größe schon im Client-Cache liegt (Prewarm).
+        self._prewarmed: set[str] = set()
         # Start-Hygiene (Befund Agenten-Flotte 05.07.2026): Orders eines
         # abgestürzten/gestoppten Vorgänger-Prozesses leben auf der Börse
         # weiter und füllen unbeaufsichtigt — beim Start alles canceln.
@@ -660,6 +662,41 @@ class LiveBroker(Broker):
         hb = getattr(self, "_hb_stop", None)
         if hb is not None:
             hb.set()
+
+    # ---- Tick-Size-Prewarm (Hot-Path-Latenz) ---------------------------------
+
+    # Höchstens so viele NEUE Tick-Größen pro Prewarm-Aufruf holen — läuft im
+    # Hintergrund-Worker (nicht im Hot Path), aber der Rate-Limit-Schutz gilt.
+    PREWARM_MAX_PER_CALL = 40
+
+    def prewarm_ticks(self, token_ids) -> int:
+        """Tick-Größen der Arb-Kandidaten vorab in den Client-Cache holen.
+
+        Flotten-Befund 06.07.2026: get_tick_size ist ein ~145ms-HTTP-GET,
+        der Client cacht aber prozessweit. Im Hot Path (Order-Bau,
+        _quantize_fok_groups) kostet die ERSTE Abfrage je Token genau diese
+        145ms — mal zwei Beine sequenziell ~290ms pro Gruppe. Wird die
+        Abfrage vom SnapshotWorker vorgezogen (alle ~90s, off Hot Path),
+        ist der Tick beim Signal bereits im Cache. Rückgabe: Anzahl neu
+        geholter Ticks. Wirft nie (Hilfspfad).
+        """
+        done = 0
+        for t in token_ids:
+            if done >= self.PREWARM_MAX_PER_CALL:
+                break
+            if t in self._prewarmed:
+                continue
+            self._prewarmed.add(t)
+            try:
+                self.client.get_tick_size(t)
+                done += 1
+            except Exception as e:  # noqa: BLE001 — Prewarm nie kritisch
+                # Cache-Miss bleibt: beim nächsten Zyklus erneut versuchen.
+                self._prewarmed.discard(t)
+                log.debug("Tick-Prewarm für %s fehlgeschlagen: %s", t[:12], e)
+        if done:
+            log.debug("Tick-Prewarm: %d neue Tick-Größen gecacht", done)
+        return done
 
     # ---- Ausführung --------------------------------------------------------
 

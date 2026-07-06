@@ -529,6 +529,20 @@ def stream_tokens(snap: MarketSnapshot, cap: int,
     return out
 
 
+def _arb_candidate_tokens(snap: MarketSnapshot) -> set[str]:
+    """Tokens der Arb-Verdachtsfälle im Snapshot (für Tick-Prewarm).
+
+    Genau die Tokens, die gleich ein Signal bekommen könnten (YES+NO-Ask
+    nahe 1) — nur für sie lohnt das Vorwärmen der Tick-Größe. Reine
+    Ableitung aus dem fertigen Snapshot, kein Netzwerk.
+    """
+    asks: dict[str, float] = {}
+    for t, b in snap.books.items():
+        if b.best_ask is not None:
+            asks[t] = b.best_ask.price
+    return _candidate_tokens(snap.markets, snap.negrisk_events, asks)
+
+
 class SnapshotWorker(threading.Thread):
     """Hintergrund-Thread: REST-Refresh (build_snapshot) im Doppelpuffer.
 
@@ -550,13 +564,16 @@ class SnapshotWorker(threading.Thread):
     def __init__(self, cfg: BotConfig, gamma: GammaClient, books: BookClient,
                  fees: FeeRateCache, streamer=None,
                  initial_backoff_s: float = 2.0, max_backoff_s: float = 60.0,
-                 min_sleep_s: float = 1.0):
+                 min_sleep_s: float = 1.0, prewarm=None):
         super().__init__(name="SnapshotWorker", daemon=True)
         self.cfg = cfg
         self.gamma = gamma
         self.books = books
         self.fees = fees
         self.streamer = streamer
+        # Optionaler Hook nach jedem frischen Snapshot (z.B. Tick-Prewarm des
+        # LiveBrokers) — läuft im Worker-Thread, off Hot Path.
+        self.prewarm = prewarm
         self.initial_backoff_s = initial_backoff_s
         self.max_backoff_s = max_backoff_s
         # Mindestpause zwischen zwei Refreshes: auch wenn der Aufbau länger
@@ -617,6 +634,13 @@ class SnapshotWorker(threading.Thread):
                     min_time_to_end_s=self.cfg.strategy.min_time_to_end_s))
             except Exception as e:  # noqa: BLE001
                 log.warning("WSS-Abo-Rotation fehlgeschlagen: %s", e)
+        if self.prewarm is not None:
+            # Tick-Größen der Arb-Kandidaten vorab holen (Hot-Path-Latenz);
+            # nie kritisch für den Snapshot.
+            try:
+                self.prewarm(_arb_candidate_tokens(snap))
+            except Exception as e:  # noqa: BLE001
+                log.debug("Tick-Prewarm-Hook fehlgeschlagen: %s", e)
         return True
 
     def _cycle(self, backoff: float) -> tuple[float, float]:
@@ -870,7 +894,11 @@ def cmd_run(cfg: BotConfig) -> None:
     # 39-52s) läuft im SnapshotWorker-Thread; der Inner-Loop hier im
     # Hauptthread tickt ununterbrochen gegen den letzten fertigen Snapshot
     # (plus Stream-Overlay) — die alte 56%-Blindzeit entfällt.
-    worker = SnapshotWorker(cfg, gamma, books, fees, streamer=streamer)
+    # Tick-Größen der Arb-Kandidaten vorab in den Client-Cache holen
+    # (Hot-Path-Latenz, nur Live-Broker): spart im Order-Bau ~145ms je Bein.
+    prewarm = getattr(broker, "prewarm_ticks", None)
+    worker = SnapshotWorker(cfg, gamma, books, fees, streamer=streamer,
+                            prewarm=prewarm)
     worker.start()
     try:
         stream_loop(cfg, worker, strategies, risk, broker, portfolio,

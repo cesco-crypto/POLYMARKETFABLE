@@ -249,3 +249,18 @@ def test_snapshot_altersdeckel_pausiert_handel(monkeypatch):
         main.stream_loop(cfg, OldWorker(), [], main.RiskManager(cfg),
                          CountingBroker(), Portfolio(cash=100.0), None)
     assert calls == []  # kein Tick gegen den veralteten Snapshot
+
+
+def test_arb_candidate_tokens_extrahiert_verdaechtige_paare():
+    from polybot.data.orderbook import Level, OrderBook
+    m = market(1)  # yes1/no1
+    # YES-Ask 0.48 + NO-Ask 0.49 = 0.97 < 1 -> Kandidat
+    books = {
+        "yes1": OrderBook("yes1", asks=[Level(0.48, 100)]),
+        "no1": OrderBook("no1", asks=[Level(0.49, 100)]),
+    }
+    snap = MarketSnapshot(markets=[m], books=books)
+    assert main._arb_candidate_tokens(snap) == {"yes1", "no1"}
+    # Summe 1.10 -> kein Kandidat
+    books["no1"] = OrderBook("no1", asks=[Level(0.62, 100)])
+    assert main._arb_candidate_tokens(MarketSnapshot(markets=[m], books=books)) == set()

@@ -1297,3 +1297,42 @@ def test_heartbeat_pingt_und_stoppt_sauber(monkeypatch):
     assert b._hb_stop.is_set()
     b._hb_thread.join(timeout=1)
     assert not b._hb_thread.is_alive()   # Thread endet sauber
+
+
+# ---- Tick-Size-Prewarm (Flotten-Befund 06.07.2026) --------------------------
+
+def test_prewarm_holt_ticks_einmal_und_dedupliziert():
+    class TickClient(FakeClobClient):
+        def __init__(self):
+            super().__init__()
+            self.tick_calls = []
+
+        def get_tick_size(self, token_id):
+            self.tick_calls.append(token_id)
+            return "0.01"
+
+    client = TickClient()
+    broker = make_live_broker(client)
+    broker._prewarmed = set()
+    assert broker.prewarm_ticks(["a", "b", "a"]) == 2   # 'a' nur einmal
+    assert sorted(client.tick_calls) == ["a", "b"]
+    assert broker.prewarm_ticks(["a", "b"]) == 0        # schon gecacht
+    assert len(client.tick_calls) == 2
+
+
+def test_prewarm_deckelt_und_ueberlebt_fehler():
+    class FlakyTickClient(FakeClobClient):
+        def get_tick_size(self, token_id):
+            if token_id == "boom":
+                raise RuntimeError("tick down")
+            return "0.01"
+
+    broker = make_live_broker(FlakyTickClient())
+    broker._prewarmed = set()
+    broker.PREWARM_MAX_PER_CALL = 2
+    assert broker.prewarm_ticks(["x", "y", "z"]) == 2   # Deckel greift
+    # Fehlerhafter Token wird NICHT als gecacht vermerkt (Retry möglich)
+    broker._prewarmed = set()
+    broker.PREWARM_MAX_PER_CALL = 40
+    broker.prewarm_ticks(["boom"])
+    assert "boom" not in broker._prewarmed
