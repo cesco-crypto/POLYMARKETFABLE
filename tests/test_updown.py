@@ -147,12 +147,19 @@ class _FakeGamma:
 
     def _get(self, path, **params):
         slug = params.get("slug")
-        row = dict(self._markets.get(slug, {}))
-        if not row:
+        base = dict(self._markets.get(slug, {}))
+        if not base:
             return []
-        if slug in self._res:
-            row["outcomePrices"] = json.dumps(self._res[slug])
-        return [row]
+        # Faithful zu Gamma: das aufgelöste Ergebnis (outcomePrices 1/0)
+        # erscheint NUR unter closed=true. Die Default-(open-)Abfrage liefert
+        # den offenen Markt OHNE finales Ergebnis. So schlägt die alte
+        # Sweep-Variante (ohne closed=true) den Resolution-Test fehl.
+        if str(params.get("closed")) == "true":
+            if slug not in self._res:
+                return []                 # noch nicht geschlossen
+            base["outcomePrices"] = json.dumps(self._res[slug])
+            return [base]
+        return [base]                     # offener Markt, kein finales Ergebnis
 
 
 class _FakeBooks:
@@ -217,3 +224,41 @@ def test_recorder_sweeps_resolution(tmp_path):
     res = [r for r in rows if r["kind"] == "resolution"]
     assert len(res) == 1
     assert res[0]["outcome"] == "up" and res[0]["slug"] == slug
+
+
+def test_backfill_resolves_missed_windows(tmp_path):
+    # Simuliert einen Neustart: die Datei enthält Snapshots eines längst
+    # beendeten Fensters OHNE Resolution-Zeile. backfill + Sweep müssen es
+    # nachträglich auflösen (Container-Neustart-Fall).
+    ws = 900
+    slug = f"btc-updown-5m-{ws}"
+    path = tmp_path / "updown.jsonl"
+    with path.open("w") as f:
+        f.write(json.dumps({"kind": "snapshot", "slug": slug, "asset": "btc",
+                            "window_start": ws, "window_end": ws + WINDOW_S,
+                            "ref_start": 100.0}) + "\n")
+    gamma = _FakeGamma({slug: {"clobTokenIds": json.dumps(["U", "D"])}},
+                       resolutions={slug: ["0", "1"]})   # DOWN
+    rec = UpDownRecorder(assets=["btc"], path=path, gamma=gamma,
+                         books=_FakeBooks({}), ticker=_FakeTicker(100.0))
+    reactivated = rec.backfill_refs_from_disk()
+    assert reactivated == 1
+    rec._sweep_resolutions(now=ws + WINDOW_S + 100)
+    rows = [json.loads(l) for l in path.read_text().strip().splitlines()]
+    res = [r for r in rows if r["kind"] == "resolution"]
+    assert len(res) == 1 and res[0]["outcome"] == "down"
+
+
+def test_backfill_skips_already_resolved(tmp_path):
+    ws = 900
+    slug = f"btc-updown-5m-{ws}"
+    path = tmp_path / "updown.jsonl"
+    with path.open("w") as f:
+        f.write(json.dumps({"kind": "snapshot", "slug": slug, "asset": "btc",
+                            "window_start": ws}) + "\n")
+        f.write(json.dumps({"kind": "resolution", "slug": slug,
+                            "outcome": "up"}) + "\n")
+    rec = UpDownRecorder(assets=["btc"], path=path,
+                         gamma=_FakeGamma({}), books=_FakeBooks({}),
+                         ticker=_FakeTicker(100.0))
+    assert rec.backfill_refs_from_disk() == 0     # bereits aufgelöst -> übersprungen

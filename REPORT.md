@@ -405,3 +405,53 @@ Buckets (Edge bei T-30s = mit 250ms fangbar; Edge nur bei T-1s = verloren).
 - Track 1 (läuft): Up/Down-Latenz-Recorder — testet den followsmartwallet-Edge.
 - Track 2 (nächster Bau): Reward-Band-Scanner + Shadow-Maker — misst die
   Adverse-Selection-Netto-Ökonomie des einzig kapital-skalierbaren Wegs.
+
+## Up/Down-Recorder — Bug-Fix + erste Stichprobe (06.07.2026 ~21:37 UTC)
+
+**Kritischer Fix vor jeder Interpretation:** Der Resolution-Sweep fragte
+Gamma ohne `closed=true`. Geschlossene 5-Min-Märkte fallen aber aus der
+Default-(open-)Abfrage — Ergebnis: nur **1 von 15** Fenstern wurde erfasst.
+Fix: Sweep mit `closed=true` (dann liefert Gamma `outcomePrices` 1/0 +
+`uma=resolved` zuverlässig, ~2-10 Min nach Schluss) plus ein Startup-
+Backfill, der nach Container-Neustart unaufgelöste Fenster aus der Datei
+reaktiviert. Danach: 15/15 aufgelöst (5 je Asset). Tests: 472 grün.
+
+**Erste Tabelle (15 Fenster, Fee 7% — bewusst konservativ gelesen):**
+
+| ≤ Sek. | Fenster | Proxy-Treffer | Ø Ask | Buch führt Sieger | Ø Rendite/Share |
+|---|---|---|---|---|---|
+| 10s | 4 | 100% | 0.929 | 100% | +0.066 |
+| 20s | 9 | 100% | 0.932 | 100% | +0.064 |
+| 30s | 15 | 100% | 0.890 | 100% | +0.104 |
+| 45s | 12 | 78.7% | 0.802 | 75.7% | **-0.025** |
+| 60s | 12 | 81.4% | 0.816 | 78.9% | **-0.012** |
+
+**Ehrliche Lesart — wie diese Zahlen (noch) lügen:**
+1. **Winzige Stichprobe.** Die «100%» der späten Buckets stehen auf 4-15
+   Fenstern (die 3-7s-Buckets auf 1-2!). Statistisch bedeutungslos, bis
+   dutzende bis hunderte Fenster über verschiedene Stunden vorliegen. Die
+   Spalte `Fenster` (nicht `n`) ist die echte Stichprobe — Snapshots eines
+   Fensters sind hochkorreliert und wurden extra ausgewiesen, damit `n` uns
+   keine Power vortäuscht.
+2. **Der Edge ist DÜNN, kein günstiger Sieger-Kauf.** «Buch führt Sieger
+   100%» bei T-30s heisst: das Buch preist die Gewinnerseite bereits mit
+   Ø 0.89 ein. Wir kaufen NICHT billig vor dem Buch — wir zahlen fast fair
+   und ernten nur den Rest (~10 Cent). Bei T-5s ist der Ask 0.99, Rest ~1
+   Cent. followsmartwallets +45k kamen dann wohl aus GRÖSSE × dünner Edge ×
+   vielen Fenstern, nicht aus fettem Per-Share-Gewinn.
+3. **T-45/60s ist bereits NEGATIV.** Genau die honest-Gegenprobe: 1 Minute
+   vor Schluss liegt der Coinbase-Proxy ~20% falsch (Preis kann noch drehen),
+   und die Fehlwetten bei Ask ~0.80 fressen den Gewinn. Das profitable
+   Fenster ist also SCHMAL und SPÄT (~T-10 bis T-30s) — dort, wo auch
+   followsmartwallet kauft.
+4. **Order-Latenz noch nicht drin.** Ø Ask ist eine Obergrenze; bei T-10s
+   muss unsere ~250ms-Kette entscheiden+füllen, bevor der Ask Richtung 1
+   wegläuft. Ob 250ms von einem Laptop reichen, ist die noch offene Frage
+   (siehe Reconciliation oben) — der schmale, sehr späte Edge macht das
+   heikel.
+
+**Zwischenfazit:** Ein reales, positiv-EV aussehendes Signal im T-10..T-30s-
+Fenster (auch nach 7% Fee), aber auf 15 Fenstern und dünn. NICHT handeln.
+Recorder weiterlaufen lassen für eine belastbare Stichprobe (Ziel: >100
+Fenster), dann entscheiden, ob die 250ms-Ausführungsrealität den Edge
+überlebt.

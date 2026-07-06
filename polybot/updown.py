@@ -379,7 +379,12 @@ class UpDownRecorder:
             if now < end + 5:        # kurze Schonfrist nach Fensterschluss
                 continue
             try:
-                rows = self.gamma._get("/markets", slug=slug)
+                # WICHTIG: closed=true. Gamma wirft geschlossene Märkte aus
+                # der Default-Abfrage (open-only) — ohne diesen Param liefert
+                # der Slug-Lookup nach Fensterschluss 0 Zeilen, und das
+                # aufgelöste Ergebnis (outcomePrices 1/0, uma=resolved) bliebe
+                # unsichtbar (Befund 06.07.2026: nur 1 von 15 Fenstern erfasst).
+                rows = self.gamma._get("/markets", slug=slug, closed="true")
             except Exception:  # pragma: no cover
                 continue
             if not rows:
@@ -399,10 +404,44 @@ class UpDownRecorder:
             })
             self._resolved.add(slug)
 
+    def backfill_refs_from_disk(self) -> int:
+        """Nach Neustart offene Fenster aus der Datei nachladen.
+
+        Der Recorder trackt sonst nur aktuelle+nächste Fenster; nach einem
+        Neustart (Container flüchtig!) blieben schon beendete, aber noch nicht
+        aufgelöste Fenster für immer ohne Ergebnis. Hier werden alle Snapshot-
+        Slugs ohne Resolution-Zeile als Ref reaktiviert, damit der normale
+        Sweep sie mit closed=true nachträgt. Gibt die Zahl reaktivierter
+        Fenster zurück.
+        """
+        rows = load_rows(self.path)
+        resolved = {r["slug"] for r in rows if r.get("kind") == "resolution"}
+        self._resolved |= resolved
+        seen = 0
+        for r in rows:
+            if r.get("kind") != "snapshot":
+                continue
+            slug = r.get("slug")
+            if not slug or slug in resolved or slug in self._refs:
+                continue
+            ws = window_start_from_slug(slug)
+            if ws is None:
+                continue
+            asset = slug.split("-", 1)[0]
+            # ref_start aus dem Snapshot übernehmen (für den Report irrelevant,
+            # der ihn aus den Snapshot-Zeilen liest — aber ehrlich mitführen).
+            ref = WindowRef(asset, ws)
+            ref.ref_start = r.get("ref_start")
+            self._refs[slug] = ref
+            seen += 1
+        return seen
+
     def run(self) -> None:  # pragma: no cover — Langläufer-Schleife
         self.ticker.start()
-        log.info("Up/Down-Recorder gestartet (Assets: %s) -> %s",
-                 ", ".join(self.assets), self.path)
+        n = self.backfill_refs_from_disk()
+        log.info("Up/Down-Recorder gestartet (Assets: %s) -> %s "
+                 "(%d unaufgelöste Fenster aus Datei reaktiviert)",
+                 ", ".join(self.assets), self.path, n)
         try:
             while not self._stop.is_set():
                 t0 = time.time()
@@ -493,8 +532,10 @@ def aggregate_updown(rows: list[dict], fee_rate: float = 0.0) -> dict:
 
         d = buckets.setdefault(b, {"n": 0, "correct": 0, "ask_sum": 0.0,
                                    "pnl_sum": 0.0, "book_leads": 0,
-                                   "book_n": 0, "size_sum": 0.0, "size_n": 0})
+                                   "book_n": 0, "size_sum": 0.0, "size_n": 0,
+                                   "windows": set()})
         d["n"] += 1
+        d["windows"].add(slug)
         d["correct"] += int(correct)
         d["ask_sum"] += ask
         d["pnl_sum"] += pnl
@@ -511,6 +552,8 @@ def aggregate_updown(rows: list[dict], fee_rate: float = 0.0) -> dict:
         n = d["n"]
         out_buckets[b] = {
             "n": n,
+            "windows": len(d["windows"]),   # ECHTE Stichprobe (Snapshots je
+                                            # Fenster sind hochkorreliert — n lügt)
             "proxy_acc": d["correct"] / n if n else None,
             "avg_ask": d["ask_sum"] / n if n else None,
             "avg_depth": d["size_sum"] / d["size_n"] if d["size_n"] else None,
