@@ -186,24 +186,43 @@ class OpportunityRecorder:
 
     MAX_BYTES = 1_000_000_000  # 1 GB ≈ mehrere Tage Messfenster
     CHECK_EVERY = 1000         # Größe nicht bei jedem observe() prüfen
+    # Retention (Flotten-Befund 06.07.2026): 99.994% der geloggten Zeilen
+    # haben net_edge < 0 (reines Verteilungs-Rauschen) und füllen den 1-GB-
+    # Deckel in ~8.5h — die tatsächlich interessanten Gelegenheiten rotieren
+    # weg, BEVOR report/cycle-report sie auswerten. Deshalb: jede Zeile mit
+    # net_edge >= SAMPLE_KEEP_EDGE wird IMMER geschrieben (die Messsubstanz),
+    # tiefer negative nur 1:NEG_SAMPLE_RATE (deterministisch, verteilungstreu).
+    NEG_SAMPLE_RATE = 500
+    SAMPLE_KEEP_EDGE = 0.0     # alles ab Break-even bleibt vollständig erhalten
 
     def __init__(self, cfg: BotConfig, path: str | Path = DEFAULT_PATH):
         self.cfg = cfg
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._writes_since_check = 0
+        self._neg_seen = 0  # Zähler für das deterministische 1:N-Sampling
+
+    def _keep(self, o: Opportunity) -> bool:
+        """Schreiben? Interessante Zeilen immer, Negativ-Rauschen 1:N."""
+        if o.above_threshold or o.net_edge >= self.SAMPLE_KEEP_EDGE:
+            return True
+        self._neg_seen += 1
+        return self._neg_seen % self.NEG_SAMPLE_RATE == 0
 
     def observe(self, snap: MarketSnapshot, ts: float | None = None) -> list[Opportunity]:
         """Snapshot auswerten und Gelegenheiten protokollieren.
 
         Darf den Tick nie crashen: Schreibfehler werden nur geloggt.
+        Rückgabe: ALLE gefundenen Gelegenheiten (ungefiltert — der Recorder
+        sampelt nur, was auf DISK landet, nicht was der Aufrufer sieht).
         """
         opps = find_opportunities(self.cfg, snap, ts=ts)
-        if opps:
+        to_write = [o for o in opps if self._keep(o)]
+        if to_write:
             try:
                 self._maybe_rotate()
                 with self.path.open("a") as fh:
-                    for o in opps:
+                    for o in to_write:
                         fh.write(json.dumps(asdict(o)) + "\n")
             except OSError as e:
                 log.warning("Opportunity-Log %s nicht schreibbar: %s", self.path, e)

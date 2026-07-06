@@ -883,6 +883,9 @@ def cmd_run(cfg: BotConfig) -> None:
     finally:
         # Kein Zustand »Bot tot, Orders leben«: bei Kill-Switch, Ctrl-C
         # oder Crash ALLE offenen Börsen-Orders canceln (Live-Broker).
+        stop_hb = getattr(broker, "stop_heartbeat", None)
+        if stop_hb is not None:
+            stop_hb()
         cancel_all = getattr(broker, "cancel_all_orders", None)
         if cancel_all is not None:
             # Mit Portfolio: letzter Reconcile-Pass vor UND nach dem Cancel,

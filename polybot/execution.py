@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -527,6 +528,13 @@ class LiveBroker(Broker):
     # (Lehre vom ersten Live-Trade 05.07.: Order matchte nach >5s trotz Cancel).
     DELAY_POLL_ATTEMPTS = 30
     DELAY_POLL_INTERVAL_S = 0.5
+    # Keep-Alive (Flotten-Befund 06.07.2026): Die CLOB-Verbindung stirbt nach
+    # ~5s Leerlauf; der erste Request einer neuen Gelegenheit zahlt dann den
+    # kalten TLS-Handshake (gemessen: 475-698ms kalt vs. 131-153ms warm; 4s
+    # hält 146ms, 6s reicht nicht). Ein Hintergrund-Ping alle HEARTBEAT_S
+    # hält die Verbindung warm — Gelegenheiten liegen Minuten auseinander,
+    # ohne Heartbeat wäre JEDER Schuss kalt.
+    HEARTBEAT_S = 4.0
     # Nach so vielen erfolglosen get_order-Abfragen wird das Tracking beendet.
     MAX_RECONCILE_MISSES = 10
     # Ablehnungstexte, die einen Konfigurationsfehler bedeuten: Wiederholen
@@ -578,6 +586,13 @@ class LiveBroker(Broker):
                 log.error("MergeExecutor nicht initialisierbar: %s — "
                           "Live-Auto-Merge deaktiviert", e)
         log.info("Live-Broker verbunden (Adresse %s)", self.client.get_address())
+        # Keep-Alive-Heartbeat: hält die CLOB-Verbindung warm (siehe
+        # HEARTBEAT_S). Daemon-Thread — stirbt mit dem Prozess; stop_heartbeat()
+        # beendet ihn sauber beim geordneten Shutdown.
+        self._hb_stop = threading.Event()
+        self._hb_thread = threading.Thread(
+            target=self._heartbeat_loop, name="clob-keepalive", daemon=True)
+        self._hb_thread.start()
         # Start-Hygiene (Befund Agenten-Flotte 05.07.2026): Orders eines
         # abgestürzten/gestoppten Vorgänger-Prozesses leben auf der Börse
         # weiter und füllen unbeaufsichtigt — beim Start alles canceln.
@@ -629,6 +644,22 @@ class LiveBroker(Broker):
             log.error("cancel_all fehlgeschlagen (%s): %s — offene Orders "
                       "ggf. VON HAND auf polymarket.com prüfen!", why, e)
             return False
+
+    # ---- Keep-Alive ----------------------------------------------------------
+
+    def _heartbeat_loop(self) -> None:
+        """Hält die CLOB-Verbindung warm; wirft nie (Daemon-Thread)."""
+        while not self._hb_stop.wait(self.HEARTBEAT_S):
+            try:
+                self.client.get_ok()
+            except Exception as e:  # noqa: BLE001 — Heartbeat ist nie kritisch
+                log.debug("Keep-Alive-Ping fehlgeschlagen: %s", e)
+
+    def stop_heartbeat(self) -> None:
+        """Heartbeat-Thread sauber beenden (geordneter Shutdown)."""
+        hb = getattr(self, "_hb_stop", None)
+        if hb is not None:
+            hb.set()
 
     # ---- Ausführung --------------------------------------------------------
 

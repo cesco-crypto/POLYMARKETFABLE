@@ -96,6 +96,9 @@ class FakeClobClient:
     def cancel_all(self):
         self.cancel_all_calls = getattr(self, "cancel_all_calls", 0) + 1
 
+    def get_ok(self):
+        return {"ok": True}
+
 
 def make_live_broker(client: FakeClobClient, cooldown_s: float = 0.0) -> LiveBroker:
     # __init__ umgehen (verlangt Key + Netzwerk); nur die Felder setzen,
@@ -346,6 +349,9 @@ class _CapturingClobClient:
 
     def get_address(self):
         return "0xEOA"
+
+    def get_ok(self):
+        return {"ok": True}
 
     def cancel_all(self):
         type(self).cancel_all_calls = getattr(type(self), "cancel_all_calls", 0) + 1
@@ -1275,3 +1281,19 @@ def test_init_cancel_fehlschlag_wird_pro_tick_nachgeholt():
     assert client.attempts >= 1
     broker.execute([], {}, pf)
     assert broker._start_cancel_pending is False
+
+
+# ---- Keep-Alive-Heartbeat (Flotten-Befund 06.07.2026) -----------------------
+
+def test_heartbeat_pingt_und_stoppt_sauber(monkeypatch):
+    import py_clob_client_v2.client as clob_mod
+
+    monkeypatch.setattr(clob_mod, "ClobClient", _CapturingClobClient)
+    b = LiveBroker(_live_cfg(None, 3))
+    b.HEARTBEAT_S = 0.01
+    import time as _t
+    _t.sleep(0.05)                       # ein paar Pings laufen lassen
+    b.stop_heartbeat()
+    assert b._hb_stop.is_set()
+    b._hb_thread.join(timeout=1)
+    assert not b._hb_thread.is_alive()   # Thread endet sauber

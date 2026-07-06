@@ -15,9 +15,14 @@ mode: live
 poll_interval_s: 90
 
 risk:
-  max_order_usdc: 20           # Mikro-Orders: begrenzt jeden Einzelfehler
-  max_position_usdc: 60
-  max_total_exposure_usdc: 150
+  max_order_usdc: 6            # Mess-Sizing (Flotten-Befund 06.07.): kleiner
+                               # als 20, damit der Kill-Switch (-30/Tag) einen
+                               # ganzen Capture-Messtag mit Race-Verlusten
+                               # überlebt statt nach wenigen Waisen zu greifen.
+                               # Hochskalieren erst, wenn die Capture-Quote
+                               # gemessen ist (Stufe 4 des Plans).
+  max_position_usdc: 20
+  max_total_exposure_usdc: 80
   daily_loss_limit_usdc: 30    # Kill-Switch: harter Tagesboden
   min_edge: 0.005              # live konservativer als Paper (0.002):
                                # Ausführungslatenz frisst kleine Edges

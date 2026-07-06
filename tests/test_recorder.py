@@ -371,3 +371,42 @@ def test_rotation_laesst_kleine_datei_in_ruhe(tmp_path):
     before = p.read_text()
     rec._maybe_rotate()
     assert p.read_text() == before
+
+
+# ---- Retention-Sampling (Flotten-Befund 06.07.2026) -------------------------
+
+def test_negativ_edge_wird_gesampelt_positiv_immer_geschrieben(tmp_path):
+    import json as _json
+    from polybot.config import BotConfig
+    from polybot.recorder import Opportunity, OpportunityRecorder
+
+    rec = OpportunityRecorder(BotConfig(), path=tmp_path / "opps.jsonl")
+    rec.NEG_SAMPLE_RATE = 10
+
+    def opp(edge, above=False):
+        return Opportunity(ts=1.0, kind="complement", market="m", gross=1.0,
+                           fees=0.0, net_edge=edge, depth=5.0,
+                           theo_profit=max(0.0, edge) * 5, above_threshold=above)
+
+    # 1000 Negativ-Zeilen -> ~100 geschrieben; 3 positive -> alle 3
+    keep_neg = sum(rec._keep(opp(-0.05)) for _ in range(1000))
+    assert 90 <= keep_neg <= 110
+    assert rec._keep(opp(0.01))              # >= break-even immer
+    assert rec._keep(opp(-0.05, above=True))  # above_threshold immer
+
+
+def test_observe_gibt_alle_opps_zurueck_schreibt_nur_gesampelt(tmp_path, monkeypatch):
+    from polybot.config import BotConfig
+    from polybot.recorder import Opportunity, OpportunityRecorder
+    import polybot.recorder as rmod
+
+    negs = [Opportunity(ts=1.0, kind="complement", market="m", gross=1.2,
+                        fees=0.0, net_edge=-0.2, depth=1.0, theo_profit=0.0,
+                        above_threshold=False) for _ in range(50)]
+    monkeypatch.setattr(rmod, "find_opportunities", lambda *a, **k: negs)
+    rec = OpportunityRecorder(BotConfig(), path=tmp_path / "opps.jsonl")
+    rec.NEG_SAMPLE_RATE = 50
+    out = rec.observe(object())
+    assert len(out) == 50                     # Aufrufer sieht alles
+    written = (tmp_path / "opps.jsonl").read_text().count("\n") if (tmp_path / "opps.jsonl").exists() else 0
+    assert written == 1                        # aber nur 1:50 auf Disk
