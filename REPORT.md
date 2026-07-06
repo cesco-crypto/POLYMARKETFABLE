@@ -499,3 +499,43 @@ auf genau diesen Märkten** (FOK-Take, acceptingOrders=True). Erst wenn nach
 Latenz/Slippage netto positiv bleibt, ist es eine Kapital-Skalierungsfrage.
 Bis dahin: weiter messen (Ziel >100 Fenster über verschiedene Stunden),
 NICHT handeln.
+
+## Up/Down — 100-Fenster-Stichprobe (07.07.2026 ~00:00 UTC): der Edge ZERFÄLLT
+
+Der süße Punkt schwächt sich mit JEDER Vergrösserung der Stichprobe ab —
+das ist der wichtigste (und ernüchterndste) Befund:
+
+| Stichprobe | T-20s acc | T-20s Polster (acc−ask) | T-20s EV n. Fee |
+|---|---|---|---|
+| 15 Fenster | 100% (Mirage) | — | +0.049 |
+| 45 Fenster | 94.7% | +5.4 pp | +0.049 |
+| **100 Fenster** | **82.0%** | **+2.8 pp** | **+0.0225** |
+
+Bei 100 Fenstern (nach 7% Fee), handelbares Band:
+- T-15s: acc 76.7%, ask 0.742, Polster **+2.5 pp**, EV +0.020
+- T-20s: acc 82.0%, ask 0.792, Polster **+2.8 pp**, EV +0.023
+- T-30s: acc 82.7%, ask 0.789, Polster **+3.7 pp**, EV +0.031
+- T-45s: acc 76.3%, ask 0.790, Polster **−2.6 pp**, EV −0.034 (negativ)
+
+**Ehrliche Lesart:**
+1. **Der Edge ist real, aber schrumpfend und jetzt HAUCHDÜNN.** Das Polster
+   (acc − Kaufpreis = die ganze Marge) fiel von +5.4 auf **+2.8..3.7 pp**.
+   Eine 3-Cent schlechtere Ausführung frisst ihn KOMPLETT. Die Wahrscheinlich-
+   keit, dass nach echter Order-Latenz/Slippage netto ~0 oder negativ bleibt,
+   ist real.
+2. **Die Trefferquote ist REGIME-abhängig.** Der Absturz 94.7%→82% zwischen
+   den Stichproben ist Tageszeit/Volatilität, nicht Rauschen. Das ist die
+   ehrliche Grundlage für Sizing: nach REGIME steuern (gemessen), nicht nach
+   Gewinn/Verlust-Serien.
+3. **Verlust-Autokorrelation (Nutzerfrage «nach Verlust grösser setzen»):**
+   nach Verlust 7/7 Treffer (100%) — aber unter Unabhängigkeit ist 7/7 zu
+   **56%** reiner Zufall (0.92^7). **Statistisch NICHTS.** Die Martingale-
+   Hypothese ist mit 7 Verlusten NICHT bestätigt; braucht Dutzende. Bis dahin:
+   konstante, kleine Grösse, kein Nachlegen (Spielerfehlschluss-Schutz).
+
+**Zwischenstand nüchtern:** Aus dem «+45k-nachbaubar»-Traum ist eine
+Grenzwert-Frage geworden: winziges Papier-Polster (~3 pp), das die
+Ausführungsrealität kippen kann. Nächster Schritt bleibt die Order-Latenz-
+Messung — sie entscheidet zwischen «knapp positiv» und «nicht nutzbar».
+Weiter messen über volle Tageszyklen (stabilisiert sich die Quote oder
+zerfällt sie weiter?).
