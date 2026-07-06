@@ -21,6 +21,22 @@ braucht die Gegenfrage «Wie könnte diese Zahl lügen?» (/CLAUDE.md).
   Einzel-Tick-Füllung, live_fill = Episodensumme; flush() bei
   Prozessende. Auswertung: `capture-report`.
 - `report` (`cmd_report`): Hochrechnung auf USDC/Tag + Kapitalfrage.
+- `updown.py` — UpDownRecorder (RISIKOFREI, handelt nicht): vermisst den
+  Spät-Fenster-Latenz-Edge der 5-Min BTC/ETH/SOL-Up/Down-Märkte. Diese
+  Märkte lösen nach dem **Chainlink**-Data-Stream auf (nicht Binance/
+  Coinbase-Spot — steht wörtlich in der Marktbeschreibung). Der Recorder
+  loggt Coinbase-Spot (handelbarer Proxy) gegen das Polymarket-Orderbuch
+  nach `data/updown.jsonl` und trägt nach Fensterschluss das echte
+  Ergebnis aus Gamma `outcomePrices` nach. Slug-Muster
+  `{btc,eth,sol}-updown-5m-<fensterstart_unix>`, Ergebnis = Up, wenn der
+  Chainlink-Preis am Ende ≥ am Start. Start: `updown-record`,
+  Auswertung: `updown-report [--fee-rate 0.07]`. Der Report bucketet nach
+  Sekunden-vor-Schluss und zeigt je Bucket: Proxy-Trefferquote, Ø Ask,
+  Ø Tiefe, Anteil «Buch führt schon den Sieger» und die realisierte
+  Ø Rendite/Share (>0 ⇒ dort war es +EV, die vorhergesagte Seite zu
+  kaufen — vor Slippage/Order-Latenz). **Proxy_acc < 100% = Coinbase-vs-
+  Chainlink-Divergenz = unser Risiko**, explizit ausgewiesen. Kontext:
+  Forensik der Wallet followsmartwallet (06.07.2026), siehe REPORT.md.
 
 ## Bekannte Lügen der Zahlen (Checkliste vor jedem Bericht)
 
@@ -40,6 +56,10 @@ braucht die Gegenfrage «Wie könnte diese Zahl lügen?» (/CLAUDE.md).
    mehrere Tage über verschiedene Tageszeiten ergeben eine Tagesrate.
 6. **Ein Markt dominiert**: Top-1/Top-3-Profitanteil prüfen
    (cycle-report) — konzentrierter Gewinn ist fragil.
+7. **Proxy statt Wahrheit** (Up/Down-Recorder): Coinbase-Spot ist NICHT
+   die Auflösungsquelle (Chainlink). Ein +EV im updown-report gilt nur,
+   solange proxy_acc die Divergenz mitträgt; zusätzlich ist der Ask ohne
+   Tiefe (Ø Tiefe) und ohne Order-Latenz eine Obergrenze, kein Realwert.
 
 ## Ergebnis-Pfad
 

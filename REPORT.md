@@ -305,3 +305,55 @@ Direkter USDC-Effekt: +0 bis +25/Tag an Mikro-Limits. Der Weg zu 1000
 bleibt: Capture messen (jetzt möglich) -> Grösse skalieren -> Pool per
 Maker-Bein erweitern. 1000/Tag ist ein Meilenstein über Wochen, kein
 Schalter.
+
+---
+
+## Strategie-Befund: Taker-Komplement-Arb ist eine (fast) leere Menge
+
+Live-Messung (06.07.2026, 3044 gefilterte Märkte): **0** Märkte mit
+YES+NO < 1 nach Gebühren, 932 «nah» bei ~1.01. Der Spread von ~1 Cent ist
+kein Taker-Arb, sondern eine MAKER-Gelegenheit. Der reine Taker-Komplement-
+Pfad kann strukturell keine 1000/Tag tragen — sichtbar auch im Shadow-Log
+(`paper_fill: 20, live_fill: 0, capture: 0`). Konsequenz: Pivot nötig.
+
+## Forensik Wallet `followsmartwallet` (06.07.2026) — der Latenz-Edge
+
+`0xbbd339eb192219358de7b92f70f595e41471641b`, ~+44'977 USD netto in 4
+Tagen. **Von Polymarkets eigener `user-pnl-api` bestätigt** (kumuliert
++8'385 -> +33'748 -> +44'323 -> +44'977). Das ist ECHTER Netto-Gewinn,
+kein Anzeige-Artefakt.
+
+- **Muster:** systematische Käufe 7-30s VOR Schluss der 5-Min BTC/ETH/SOL
+  «Up or Down»-Fenster. Kein Marktverständnis — ein Latenz-Edge.
+- **Auflösungsquelle (kritisch):** laut Marktbeschreibung der **Chainlink
+  BTC/USD-Data-Stream**, NICHT Binance/Coinbase-Spot. Up, wenn der
+  Chainlink-Preis am Fensterende ≥ am Fensterstart.
+- **«Versteckte» Verluste:** der UI-Tab «Won» zeigt nur EINGELÖSTE Gewinner;
+  auf 0 aufgelöste Verlierer werden nie redeemt und tauchen dort nie auf.
+  On-chain belegt: Wette 02.07. 22:05 UTC mit -14'000 USD — fehlt in der
+  UI-Kachel, steckt aber ehrlich in der PnL-Kurve. **Polymarket fälscht
+  nichts**, die «Won»-Kachel ist nur ein geschöntes Schaufenster.
+- **Selbstkorrektur:** ein früher «Gotcha» («Wallet hält auch nur 610 USD»)
+  war MEIN Fehler — die 610.07 waren die Cash-Kopfzeile des BETRACHTER-
+  Kontos, nicht die der Wallet. Zurückgezogen.
+
+## Instrument gebaut: `updown.py` — Latenz-Edge risikofrei vermessen
+
+Statt die Wallet blind zu kopieren, MESSEN wir den Edge selbst, bevor
+Kapital fliesst (erst messen, dann handeln):
+
+- `updown-record`: loggt Coinbase-Spot (handelbarer Proxy) gegen das
+  Polymarket-Orderbuch der aktiven Fenster nach `data/updown.jsonl`;
+  trägt nach Schluss das echte Chainlink-Ergebnis (Gamma `outcomePrices`)
+  nach. Handelt NICHT.
+- `updown-report [--fee-rate]`: bucketet nach Sekunden-vor-Schluss und
+  zeigt Proxy-Trefferquote, Ø Ask, Ø Tiefe, «Buch führt Sieger» und die
+  realisierte Ø Rendite/Share. **Die eine Frage:** ab welcher Sekunde vor
+  Schluss ist es +EV, die vom Proxy vorhergesagte Seite zum Buch-Ask zu
+  kaufen? Live-Smoke bestätigt sinnvolle Daten (z.B. ETH T-35s: Spot up,
+  Up-Token-Ask 0.20 — Buch preist die Richtung noch nicht ein).
+- **Ehrlichkeits-Vorbehalte im Report:** proxy_acc<100% = Coinbase-vs-
+  Chainlink-Divergenz (Risiko); Ø Ask ohne Tiefe/Order-Latenz ist eine
+  Obergrenze, kein Realwert. Erst mehrere Stunden Daten + positiver EV in
+  den späten Buckets rechtfertigen den nächsten Schritt (Shadow-Order,
+  dann Mikro-Live).

@@ -7,6 +7,8 @@
   python -m polybot.main report          # Opportunity-Log auswerten (--target)
   python -m polybot.main cycle-report    # kompakte Zyklus-Selbstauswertung
   python -m polybot.main capture-report  # Live/Paper-Schattenvergleich auswerten
+  python -m polybot.main updown-record   # Up/Down-Latenz-Recorder (risikofrei)
+  python -m polybot.main updown-report   # Up/Down-Recorder auswerten
   python -m polybot.main preflight       # Go-Live-Startstrecke (EOA) prüfen
   python -m polybot.main preflight --execute  # ... und wirklich ausführen
 """
@@ -1152,16 +1154,85 @@ def cmd_capture_report(cfg: BotConfig,
     return agg
 
 
+def cmd_updown_record(cfg: BotConfig) -> None:
+    """Up/Down-Latenz-Recorder starten (RISIKOFREI, handelt nicht).
+
+    Beobachtet die 5-Min BTC/ETH/SOL-Up/Down-Fenster: Coinbase-Referenz-Spot
+    gegen das Polymarket-Orderbuch, protokolliert nach data/updown.jsonl, und
+    trägt nach Fensterschluss das echte (Chainlink-basierte) Ergebnis nach.
+    Auswertung danach mit `updown-report`.
+    """
+    from polybot.updown import UpDownRecorder
+    rec = UpDownRecorder()
+    stop = _install_signal_stop(rec.stop)
+    try:
+        rec.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        rec.stop()
+    del stop
+
+
+def cmd_updown_report(cfg: BotConfig, fee_rate: float | None = None) -> dict | None:
+    """Up/Down-Recorder auswerten: Edge pro Sekunden-vor-Schluss-Bucket."""
+    from polybot.updown import DATA_PATH, aggregate_updown, load_rows
+    rows = load_rows(DATA_PATH)
+    if not rows:
+        console.print(f"[yellow]Keine Up/Down-Daten in {DATA_PATH} — erst "
+                      "`python -m polybot.main updown-record` laufen lassen.[/yellow]")
+        return None
+    rate = fee_rate if fee_rate is not None else 0.0
+    agg = aggregate_updown(rows, fee_rate=rate)
+    console.print(f"[bold]Up/Down-Latenz-Report[/bold] — "
+                  f"{agg['windows_resolved']} aufgelöste Fenster, "
+                  f"{agg['snapshots_used']} handelbare Snapshots, "
+                  f"Fee-Rate {agg['fee_rate']:.3f}")
+    console.print("[dim]Kauf der Referenz-vorhergesagten Seite zum Buch-Ask. "
+                  "proxy_acc<100% = Coinbase-vs-Chainlink-Divergenz (Risiko).[/dim]")
+    table = Table(title="Edge je Sekunden vor Fensterschluss")
+    for col in ("≤ Sek.", "n", "Proxy-Treffer", "Ø Ask", "Ø Tiefe",
+                "Buch führt Sieger", "Ø Rendite/Share"):
+        table.add_column(col, justify="right" if col != "≤ Sek." else "left")
+    for b in sorted(agg["by_offset"]):
+        d = agg["by_offset"][b]
+        def pct(x):
+            return "—" if x is None else f"{x * 100:.1f}%"
+        ev = d["ev"]
+        ev_s = "—" if ev is None else f"{ev:+.4f}"
+        table.add_row(f"{b}s", str(d["n"]), pct(d["proxy_acc"]),
+                      "—" if d["avg_ask"] is None else f"{d['avg_ask']:.3f}",
+                      "—" if d.get("avg_depth") is None else f"{d['avg_depth']:.0f}",
+                      pct(d["book_leads_winner"]), ev_s)
+    console.print(table)
+    console.print("[dim]Ø Rendite/Share > 0 in einem Bucket = dort war es +EV, "
+                  "die vorhergesagte Seite zu kaufen (vor Slippage/Order-Latenz).[/dim]")
+    return agg
+
+
+def _install_signal_stop(stop_fn):
+    """SIGTERM/SIGINT sauber in stop_fn umleiten (Container-Shutdown)."""
+    import signal
+    try:
+        signal.signal(signal.SIGTERM, lambda *_: stop_fn())
+    except (ValueError, OSError):  # pragma: no cover — kein Main-Thread
+        pass
+    return stop_fn
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="polybot")
     parser.add_argument("command",
                         choices=["scan", "run", "status", "report",
-                                 "cycle-report", "capture-report", "preflight"])
+                                 "cycle-report", "capture-report",
+                                 "updown-record", "updown-report", "preflight"])
     # default=None: BotConfig.load unterscheidet so zwischen explizit gesetztem
     # --config (Datei MUSS existieren) und implizitem config.yaml-Fallback.
     parser.add_argument("--config", default=None)
     parser.add_argument("--target", type=float, default=1000.0,
                         help="Zielprofit in USDC/Tag für die Kapitalfrage (report)")
+    parser.add_argument("--fee-rate", type=float, default=None,
+                        help="Taker-Fee-Rate für den updown-report (Default 0.0)")
     parser.add_argument("--execute", action="store_true",
                         help="preflight: Transaktionen wirklich senden "
                              "(Default: nur prüfen und PLAN drucken)")
@@ -1179,9 +1250,13 @@ def main() -> None:
     if args.command == "preflight":
         cmd_preflight(cfg, execute=args.execute)
         return
+    if args.command == "updown-report":
+        cmd_updown_report(cfg, fee_rate=args.fee_rate)
+        return
     {"scan": cmd_scan, "run": cmd_run, "status": cmd_status,
      "cycle-report": cmd_cycle_report,
-     "capture-report": cmd_capture_report}[args.command](cfg)
+     "capture-report": cmd_capture_report,
+     "updown-record": cmd_updown_record}[args.command](cfg)
 
 
 if __name__ == "__main__":

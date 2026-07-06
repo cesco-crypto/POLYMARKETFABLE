@@ -17,6 +17,8 @@ python -m polybot.main status                             # Portfolio ansehen
 python -m polybot.main report --target 1000               # Hochrechnung & Kapitalfrage
 python -m polybot.main cycle-report                       # Fenster-Metriken (PnL-Ledger)
 python -m polybot.main capture-report                     # Live vs. Paper (Capture-Quote)
+python -m polybot.main updown-record                      # Up/Down-Latenz-Recorder (risikofrei)
+python -m polybot.main updown-report [--fee-rate 0.07]    # Up/Down-Edge je Sek. vor Schluss
 python -m polybot.main preflight [--execute]              # Live-Vorflugkontrolle
 python -m pytest tests/ -q                                # MUSS grün sein vor jedem Deploy
 ```
