@@ -357,3 +357,51 @@ Kapital fliesst (erst messen, dann handeln):
   Obergrenze, kein Realwert. Erst mehrere Stunden Daten + positiver EV in
   den späten Buckets rechtfertigen den nächsten Schritt (Shadow-Order,
   dann Mikro-Live).
+- **Betriebs-Befund (06.07. 21:16 UTC):** Gamma flippt `outcomePrices`
+  erst **2-10 Min NACH Fensterschluss** auf final 1/0 (davor Handelspreise).
+  Die Resolution-Wahrheit laggt also — Recorder holt sie per Retry nach,
+  aber eine erste belastbare Tabelle braucht ~45-75 Min, nicht 20.
+
+## Strategie-Pivot-Flotte (45 Agenten, 06.07.2026) — unabhängige Bestätigung
+
+Read-only-Messanalyse «Warum 0 Trades, ist Taker-Arb tot, was verdient
+echt Geld?». Kernurteile, mehrfach unabhängig belegt:
+
+1. **Taker-Komplement-Arb ist STRUKTURELL leer, nicht nur gerade jetzt.**
+   Bestes Paar im ganzen liquiden Universum: YES+NO = **1.0010** (0.1 Cent
+   ÜBER der 1.0-Auszahlung, vor Fees). Historisch (6.71 Mio. Beobachtungen)
+   nur 11 Märkte je < 1 — 10 davon Krypto-Up/Down-Endgame (per 300s-Filter
+   ausgeschlossen), 1 Nicht-Krypto nie netto-positiv. 0 Komplement-Signaturen
+   in ~15'000 Trades. **0 Gelegenheiten × beliebiges Kapital = 0.** Der
+   1-Cent-Spread ist der Maker-Spread, den wir als Taker BEZAHLEN.
+   → complement_arb nur noch als kostenloser Sensor mitlaufen lassen, NICHT
+   weiter latenz-tunen oder Kapital draufwerfen.
+2. **Einzige nichtleere Strategie: gezieltes Reward-Maker-Farming.** Aber
+   Ertrag skaliert mit KAPITAL, nicht Cleverness, und die Reward-Zahlen sind
+   BRUTTO. Nur ~176/2847 liquide Märkte (6%) tragen materielle Rewards,
+   Top-10 ≈ 69% des Pools. Bei 600 USDC: ~60-120 USDC/Tag **brutto**, davon
+   geht der **ungemessene Netto-Term ab (Adverse Selection + Inventarverlust)**
+   — netto evtl. nahe 0. Für 1000/Tag netto: **~20'000-100'000 USDC** +
+   Inventar-Management + Wochen Aufbau.
+3. **Die ehrliche 1000/Tag-Wahrheit:** Mit 600 USDC **mit keiner Strategie**
+   erreichbar. Die 600 sind ein **Mess-Budget, kein Ertragsbudget.** Der
+   Auftrag ist, die Netto-Reward-Ökonomie zu MESSEN (Shadow-Maker + Adverse
+   Selection), bevor Kapital fliesst.
+4. **Trugbilder, denen NIE glauben:** «100%-Quote» leerer Reward-Bänder
+   (leer, WEIL ruhende Maker abgeschossen werden) und die «2463 USDC/Tag»-
+   Greedy-Hochrechnung (~20× aufgeblasen aus leeren Live-Sport-Bändern).
+
+**Reconciliation mit dem Up/Down-Latenz-Track:** Beide Befunde sind
+kompatibel. complement_arb ist tot (beide Seiten einig). Der Up/Down-Edge
+ist KEIN Taker-Arb, sondern ein Latenz-/Richtungs-Edge auf demselben
+Markt — die Flotte ist zu Recht skeptisch gegen «direktionales Trading»
+allgemein, aber wir haben forensische Evidenz (followsmartwallet +45k) UND
+messen risikofrei, statt zu wetten. **Offene Kernfrage, die BEIDE Tracks
+teilen:** Können WIR das Latenz-Rennen mit ~250ms von einem Laptop
+gewinnen? Der updown-report beantwortet das über die Sekunden-vor-Schluss-
+Buckets (Edge bei T-30s = mit 250ms fangbar; Edge nur bei T-1s = verloren).
+
+**Zwei parallele risikofreie Mess-Tracks, priorisiert nach früher Datenlage:**
+- Track 1 (läuft): Up/Down-Latenz-Recorder — testet den followsmartwallet-Edge.
+- Track 2 (nächster Bau): Reward-Band-Scanner + Shadow-Maker — misst die
+  Adverse-Selection-Netto-Ökonomie des einzig kapital-skalierbaren Wegs.
