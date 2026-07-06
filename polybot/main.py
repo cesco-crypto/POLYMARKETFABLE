@@ -1188,11 +1188,13 @@ def cmd_updown_report(cfg: BotConfig, fee_rate: float | None = None) -> dict | N
                   f"{agg['windows_resolved']} aufgelöste Fenster, "
                   f"{agg['snapshots_used']} handelbare Snapshots, "
                   f"Fee-Rate {agg['fee_rate']:.3f}")
-    console.print("[dim]Kauf der Referenz-vorhergesagten Seite zum Buch-Ask. "
-                  "proxy_acc<100% = Coinbase-vs-Chainlink-Divergenz (Risiko).[/dim]")
+    console.print("[dim]Signal = MEDIAN aus Coinbase+Kraken+Binance.us. Kauf der "
+                  "vorhergesagten Seite zum Buch-Ask. Median≈Chain = Anteil, in dem "
+                  "der Börsen-Median mit Chainlink-on-chain übereinstimmt (direkte "
+                  "Divergenzmessung); <100% = Proxy-Fehler.[/dim]")
     table = Table(title="Edge je Sekunden vor Fensterschluss")
-    for col in ("≤ Sek.", "Fenster", "n", "Proxy-Treffer", "Ø Ask", "Ø Tiefe",
-                "Buch führt Sieger", "Ø Rendite/Share"):
+    for col in ("≤ Sek.", "Fenster", "n", "Proxy-Treffer", "Median≈Chain",
+                "Ø Ask", "Ø Tiefe", "Buch führt Sieger", "Ø Rendite/Share"):
         table.add_column(col, justify="right" if col != "≤ Sek." else "left")
     for b in sorted(agg["by_offset"]):
         d = agg["by_offset"][b]
@@ -1201,7 +1203,7 @@ def cmd_updown_report(cfg: BotConfig, fee_rate: float | None = None) -> dict | N
         ev = d["ev"]
         ev_s = "—" if ev is None else f"{ev:+.4f}"
         table.add_row(f"{b}s", str(d.get("windows", "?")), str(d["n"]),
-                      pct(d["proxy_acc"]),
+                      pct(d["proxy_acc"]), pct(d.get("chain_agree")),
                       "—" if d["avg_ask"] is None else f"{d['avg_ask']:.3f}",
                       "—" if d.get("avg_depth") is None else f"{d['avg_depth']:.0f}",
                       pct(d["book_leads_winner"]), ev_s)

@@ -33,26 +33,61 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import statistics
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import requests
 
 from polybot.data.gamma import GammaClient
 from polybot.data.orderbook import BookClient
 
 log = logging.getLogger(__name__)
 
-# Assets mit 5-Min-Up/Down-Fenstern und ihrem Coinbase-Spot-Produkt.
-# Chainlink löst diese Feeds auf; Coinbase-Spot ist unser handelbarer Proxy.
-ASSET_PRODUCTS = {
-    "btc": "BTC-USD",
-    "eth": "ETH-USD",
-    "sol": "SOL-USD",
+# Assets mit 5-Min-Up/Down-Fenstern. Chainlink löst diese Märkte auf; unser
+# handelbares Live-Signal ist der MEDIAN mehrerer Börsen — Chainlink selbst
+# ist ein Median vieler Quellen, also nähert ein Börsen-Median den Oracle
+# besser an als eine einzelne Börse. Pro Börse das jeweilige Handelspaar:
+ASSETS = ["btc", "eth", "sol"]
+EXCHANGE_SYMBOLS = {
+    "coinbase":  {"btc": "BTC-USD",  "eth": "ETH-USD",  "sol": "SOL-USD"},
+    "kraken":    {"btc": "XBT/USD",  "eth": "ETH/USD",  "sol": "SOL/USD"},
+    "binanceus": {"btc": "BTCUSDT",  "eth": "ETHUSDT",  "sol": "SOLUSDT"},
 }
+# Rückwärts-Kompatibilität: einige Aufrufer/Tests referenzieren noch das
+# Coinbase-Produkt-Mapping.
+ASSET_PRODUCTS = EXCHANGE_SYMBOLS["coinbase"]
 
 WINDOW_S = 300           # 5-Minuten-Fenster
 DATA_PATH = Path("data") / "updown.jsonl"
 COINBASE_WS = "wss://ws-feed.exchange.coinbase.com"
+KRAKEN_WS = "wss://ws.kraken.com"
+BINANCEUS_REST = "https://api.binance.us/api/v3/ticker/price"
+
+# Chainlink-Preis-Aggregatoren (klassische AggregatorV3) auf Polygon. Das ist
+# ECHTES Chainlink — aber der on-chain-Aggregator (Heartbeat/Deviation, ~15-30s)
+# ist NICHT der Low-Latency-Data-Stream, der die Märkte final auflöst. Er dient
+# hier als zweite Referenz, um die Divergenz Börsen-Median↔Chainlink DIREKT zu
+# messen statt sie nur aus Fehltreffern abzuleiten.
+CHAINLINK_RPC = "https://polygon-bor-rpc.publicnode.com"
+CHAINLINK_FEEDS = {
+    "btc": "0xc907E116054Ad103354f2D350FD2514433D57F6f",
+    "eth": "0xF9680D99D6C9589e2a93a78A04A279e509205945",
+    "sol": "0x10C8264C0935b3B9870013e057f330Ff3e9C56dc",
+}
+_CHAINLINK_ABI = [
+    {"inputs": [], "name": "latestRoundData",
+     "outputs": [{"name": "roundId", "type": "uint80"},
+                 {"name": "answer", "type": "int256"},
+                 {"name": "startedAt", "type": "uint256"},
+                 {"name": "updatedAt", "type": "uint256"},
+                 {"name": "answeredInRound", "type": "uint80"}],
+     "stateMutability": "view", "type": "function"},
+    {"inputs": [], "name": "decimals",
+     "outputs": [{"name": "", "type": "uint8"}],
+     "stateMutability": "view", "type": "function"},
+]
 
 # Ein Referenz-Tick älter als das gilt als veraltet (Feed-Hänger) und wird im
 # Snapshot als stale markiert — der Report filtert solche Zeilen aus.
@@ -124,11 +159,12 @@ def outcome_from_prices(outcome_prices: list | None) -> str | None:
 
 @dataclass
 class WindowRef:
-    """Referenz-Startpreis eines Fensters (einmal am Fensterstart erfasst)."""
+    """Referenz-Startpreise eines Fensters (einmal am Fensterstart erfasst)."""
     asset: str
     window_start: int
-    ref_start: float | None = None      # Coinbase-Spot am/kurz nach Fensterstart
+    ref_start: float | None = None      # Börsen-Median am/kurz nach Fensterstart
     ref_start_ts: float | None = None
+    chain_start: float | None = None    # Chainlink on-chain am Fensterstart
 
 
 def build_snapshot(*, ts: float, asset: str, slug: str, window_start: int,
@@ -138,12 +174,21 @@ def build_snapshot(*, ts: float, asset: str, slug: str, window_start: int,
                    ref_now: float | None, ref_ts: float | None,
                    ref_start: float | None,
                    up_ask_size: float | None = None,
-                   down_ask_size: float | None = None) -> dict:
+                   down_ask_size: float | None = None,
+                   ref_sources: int = 0,
+                   px_sources: dict | None = None,
+                   chain_price: float | None = None,
+                   chain_age_s: float | None = None,
+                   chain_start: float | None = None) -> dict:
     """Eine Beobachtungszeile bauen (reine Funktion, alle Werte schon gelesen).
 
-    Die Ask-Größen (kaufbare Shares am besten Ask) gehören mit ins Protokoll:
-    ohne sie täuscht ein Edge vor, der nur für eine Handvoll Shares an der
-    Spitze existiert. Der Report weist die Tiefe je Bucket aus.
+    Das Live-Signal `ref_now` ist der MEDIAN der frischen Börsenpreise
+    (`ref_sources` = Zahl der eingegangenen Börsen). Die Einzelpreise
+    (`px_sources`) und der on-chain Chainlink-Preis (`chain_price`) werden roh
+    mitgeführt: `pred` (Median-Richtung) vs `chain_pred` (Chainlink-Richtung)
+    misst die Divergenz Börsen↔Chainlink DIREKT statt nur aus Fehltreffern.
+    Die Ask-Größen gehören mit ins Protokoll, sonst täuscht ein Edge vor, der
+    nur für eine Handvoll Shares an der Spitze existiert.
     """
     window_end = window_start + WINDOW_S
     up_mid = _mid(up_bid, up_ask)
@@ -164,11 +209,17 @@ def build_snapshot(*, ts: float, asset: str, slug: str, window_start: int,
         "down_bid": down_bid, "down_ask": down_ask, "down_mid": down_mid,
         "down_ask_size": down_ask_size,
         "ref_price": ref_now,
+        "ref_sources": ref_sources,
+        "px": px_sources or {},
         "ref_ts": round(ref_ts, 3) if ref_ts is not None else None,
         "ref_age_s": round(ref_age, 3) if ref_age is not None else None,
         "ref_stale": (ref_age is None or ref_age > REF_STALE_S),
         "ref_start": ref_start,
         "pred": predict_direction(ref_now, ref_start),
+        "chain_price": chain_price,
+        "chain_age_s": round(chain_age_s, 1) if chain_age_s is not None else None,
+        "chain_start": chain_start,
+        "chain_pred": predict_direction(chain_price, chain_start),
     }
 
 
@@ -179,25 +230,194 @@ def _mid(bid: float | None, ask: float | None) -> float | None:
 
 
 # ---------------------------------------------------------------------------
-# Coinbase-Referenz-Feed (Hintergrund-Thread, thread-sicher, wirft nie nach außen)
+# Börsen-Median-Referenz (mehrere Feeds, thread-sicher, wirft nie nach außen)
 # ---------------------------------------------------------------------------
 
-class CoinbaseTicker:
-    """Hält den letzten Coinbase-Ticker-Preis je Produkt aus dem WSS-Feed.
+def median_price(sources: dict, now: float,
+                 max_age: float = REF_STALE_S) -> tuple[float | None, float | None, int]:
+    """Median der FRISCHEN Börsenpreise -> (median, neuester_ts, n_frisch).
 
-    Spiegelt die Robustheit von data/stream.py: eigener Thread, Reconnect mit
-    Backoff, thread-sicherer Cache. get_price liefert (preis, feed_ts) oder
-    (None, None) bei totem Feed — der Aufrufer entscheidet (stale-Markierung).
+    sources: {börse: (preis, ts)}. Nur Preise jünger als max_age zählen — ein
+    hängender Feed darf den Median nicht vergiften. Reine Funktion (testbar).
+    """
+    fresh = [(p, ts) for (p, ts) in sources.values()
+             if p is not None and ts is not None and now - ts <= max_age]
+    if not fresh:
+        return None, None, 0
+    return (statistics.median([p for p, _ in fresh]),
+            max(ts for _, ts in fresh), len(fresh))
+
+
+class MultiExchangeTicker:
+    """Live-Median über mehrere Börsen (Coinbase-WS, Kraken-WS, Binance.us-REST).
+
+    Chainlink ist selbst ein Median vieler Quellen — ein Börsen-Median nähert
+    den Oracle darum besser an als eine einzelne Börse und ist robuster gegen
+    einen einzelnen ausreißenden/hängenden Feed. Jede Börse läuft in einem
+    eigenen Daemon-Thread mit Reconnect; keine Methode wirft nach außen.
     """
 
-    def __init__(self, products: list[str], url: str = COINBASE_WS, connect=None):
-        self.products = products
-        self.url = url
+    EXCHANGES = ("coinbase", "kraken", "binanceus")
+
+    def __init__(self, assets: list[str] | None = None, connect=None,
+                 http: requests.Session | None = None):
+        self.assets = assets or list(ASSETS)
         self._connect = connect or _default_ws_connect
+        self._http = http or requests.Session()
         self._lock = threading.Lock()
-        self._prices: dict[str, tuple[float, float]] = {}   # prod -> (price, ts)
+        self._prices: dict[tuple[str, str], tuple[float, float]] = {}
+        self._stop = threading.Event()
+        self._threads: list[threading.Thread] = []
+
+    def start(self) -> None:
+        if self._threads:
+            return
+        self._threads = [
+            threading.Thread(target=self._run_coinbase, daemon=True),
+            threading.Thread(target=self._run_kraken, daemon=True),
+            threading.Thread(target=self._run_binanceus, daemon=True),
+        ]
+        for t in self._threads:
+            t.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _put(self, exch: str, asset: str, price: float) -> None:
+        with self._lock:
+            self._prices[(exch, asset)] = (price, time.time())
+
+    def get_sources(self, asset: str) -> dict[str, tuple[float, float]]:
+        with self._lock:
+            return {e: self._prices[(e, asset)] for e in self.EXCHANGES
+                    if (e, asset) in self._prices}
+
+    def snapshot(self, asset: str, now: float | None = None):
+        """(median, neuester_ts, n_frisch, {börse: preis}) für einen Asset."""
+        now = time.time() if now is None else now
+        src = self.get_sources(asset)
+        med, ts, n = median_price(src, now)
+        px = {e: round(p, 4) for e, (p, _) in src.items()}
+        return med, ts, n, px
+
+    # -- Coinbase (WS ticker) --------------------------------------------
+    def _run_coinbase(self) -> None:  # pragma: no cover — Netz/Feed
+        sym = EXCHANGE_SYMBOLS["coinbase"]
+        rev = {v: k for k, v in sym.items()}
+        backoff = 1.0
+        while not self._stop.is_set():
+            try:
+                ws = self._connect(COINBASE_WS)
+                ws.send(json.dumps({"type": "subscribe",
+                                    "product_ids": [sym[a] for a in self.assets],
+                                    "channels": ["ticker"]}))
+                backoff = 1.0
+                while not self._stop.is_set():
+                    m = json.loads(ws.recv())
+                    if m.get("type") != "ticker":
+                        continue
+                    a = rev.get(m.get("product_id"))
+                    try:
+                        if a:
+                            self._put("coinbase", a, float(m["price"]))
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                self._safe_close(ws)
+            except Exception as e:
+                if self._stop.is_set():
+                    break
+                log.warning("Coinbase-Feed getrennt (%s) — Reconnect %.0fs", e, backoff)
+                self._stop.wait(backoff)
+                backoff = min(backoff * 2, 30.0)
+
+    # -- Kraken (WS ticker) ----------------------------------------------
+    def _run_kraken(self) -> None:  # pragma: no cover — Netz/Feed
+        sym = EXCHANGE_SYMBOLS["kraken"]
+        rev = {v: k for k, v in sym.items()}
+        backoff = 1.0
+        while not self._stop.is_set():
+            try:
+                ws = self._connect(KRAKEN_WS)
+                ws.send(json.dumps({"event": "subscribe",
+                                    "pair": [sym[a] for a in self.assets],
+                                    "subscription": {"name": "ticker"}}))
+                backoff = 1.0
+                while not self._stop.is_set():
+                    m = json.loads(ws.recv())
+                    # Ticker-Payload ist eine Liste [chanId, {...}, "ticker", pair]
+                    if not isinstance(m, list) or len(m) < 4:
+                        continue
+                    a = rev.get(m[3])
+                    try:
+                        last = float(m[1]["c"][0])
+                        if a:
+                            self._put("kraken", a, last)
+                    except (KeyError, TypeError, ValueError, IndexError):
+                        continue
+                self._safe_close(ws)
+            except Exception as e:
+                if self._stop.is_set():
+                    break
+                log.warning("Kraken-Feed getrennt (%s) — Reconnect %.0fs", e, backoff)
+                self._stop.wait(backoff)
+                backoff = min(backoff * 2, 30.0)
+
+    # -- Binance.us (REST-Poll; WS ist von hier geoblockt) ---------------
+    def _run_binanceus(self) -> None:  # pragma: no cover — Netz/Feed
+        sym = EXCHANGE_SYMBOLS["binanceus"]
+        rev = {v: k for k, v in sym.items()}
+        # Kompakt ohne Leerzeichen: binance.us' symbols-Regex verbietet Spaces
+        # (json.dumps setzt sonst ", " und der Server antwortet 400).
+        symbols = json.dumps([sym[a] for a in self.assets], separators=(",", ":"))
+        while not self._stop.is_set():
+            try:
+                r = self._http.get(BINANCEUS_REST, params={"symbols": symbols},
+                                   timeout=8)
+                r.raise_for_status()
+                for row in r.json():
+                    a = rev.get(row.get("symbol"))
+                    try:
+                        if a:
+                            self._put("binanceus", a, float(row["price"]))
+                    except (KeyError, TypeError, ValueError):
+                        continue
+            except Exception as e:
+                log.debug("Binance.us-Poll fehlgeschlagen: %s", e)
+            self._stop.wait(1.0)
+
+    @staticmethod
+    def _safe_close(ws) -> None:
+        try:
+            ws.close()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Chainlink-on-chain-Referenz (Polygon, gratis über web3) — zweite Referenz
+# ---------------------------------------------------------------------------
+
+class ChainlinkPolygonRef:
+    """Pollt die Chainlink-Aggregatoren auf Polygon (BTC/ETH/SOL-USD).
+
+    ECHTES Chainlink, aber der on-chain-Aggregator (Heartbeat/Deviation) läuft
+    dem Low-Latency-Data-Stream hinterher, der die Märkte final auflöst — er
+    misst die Divergenz Börsen↔Chainlink, ist aber selbst kein Sekundensignal.
+    Wirft nie nach außen: fehlt web3/RPC, liefert get_price (None, None).
+    """
+
+    def __init__(self, assets: list[str] | None = None,
+                 rpc_url: str = CHAINLINK_RPC, poll_s: float = 6.0, w3=None):
+        self.assets = assets or list(ASSETS)
+        self.rpc_url = rpc_url
+        self.poll_s = poll_s
+        self._w3 = w3
+        self._lock = threading.Lock()
+        # asset -> (price, onchain_updated_ts)
+        self._prices: dict[str, tuple[float, float]] = {}
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._contracts: dict = {}
 
     def start(self) -> None:
         if self._thread is None:
@@ -207,46 +427,44 @@ class CoinbaseTicker:
     def stop(self) -> None:
         self._stop.set()
 
-    def get_price(self, product: str) -> tuple[float | None, float | None]:
+    def get_price(self, asset: str) -> tuple[float | None, float | None]:
+        """(preis, on-chain-updatedAt) oder (None, None)."""
         with self._lock:
-            p = self._prices.get(product)
+            p = self._prices.get(asset)
         return (p[0], p[1]) if p else (None, None)
 
-    def _run(self) -> None:
-        backoff = 1.0
+    def _ensure_contracts(self) -> bool:
+        if self._contracts:
+            return True
+        try:
+            from web3 import HTTPProvider, Web3
+            if self._w3 is None:
+                self._w3 = Web3(HTTPProvider(self.rpc_url))
+            for a in self.assets:
+                addr = CHAINLINK_FEEDS.get(a)
+                if not addr:
+                    continue
+                c = self._w3.eth.contract(
+                    address=self._w3.to_checksum_address(addr), abi=_CHAINLINK_ABI)
+                dec = c.functions.decimals().call()
+                self._contracts[a] = (c, dec)
+            return bool(self._contracts)
+        except Exception as e:  # pragma: no cover — web3 fehlt / RPC down
+            log.warning("Chainlink-Referenz nicht initialisierbar (%s) — "
+                        "on-chain-Spalte bleibt leer", e)
+            return False
+
+    def _run(self) -> None:  # pragma: no cover — Netz/RPC
         while not self._stop.is_set():
-            try:
-                ws = self._connect(self.url)
-                ws.send(json.dumps({
-                    "type": "subscribe",
-                    "product_ids": self.products,
-                    "channels": ["ticker"],
-                }))
-                backoff = 1.0
-                while not self._stop.is_set():
-                    msg = json.loads(ws.recv())
-                    if msg.get("type") != "ticker":
-                        continue
-                    prod = msg.get("product_id")
+            if self._ensure_contracts():
+                for a, (c, dec) in self._contracts.items():
                     try:
-                        price = float(msg["price"])
-                    except (KeyError, TypeError, ValueError):
-                        continue
-                    # Eigene Empfangszeit statt Feed-"time": Latenz messen wir
-                    # gegen unsere Uhr (dieselbe wie die Snapshot-Zeit).
-                    with self._lock:
-                        self._prices[prod] = (price, time.time())
-                try:
-                    ws.close()
-                except Exception:
-                    pass
-            except Exception as e:  # pragma: no cover — Netz/Feed-Fehler
-                if self._stop.is_set():
-                    break
-                log.warning("Coinbase-Feed getrennt (%s) — Reconnect in %.0fs",
-                            e, backoff)
-                self._stop.wait(backoff)
-                backoff = min(backoff * 2, 30.0)
+                        rd = c.functions.latestRoundData().call()
+                        with self._lock:
+                            self._prices[a] = (rd[1] / 10 ** dec, float(rd[3]))
+                    except Exception as e:
+                        log.debug("Chainlink %s Abruf fehlgeschlagen: %s", a, e)
+            self._stop.wait(self.poll_s if self._contracts else 30.0)
 
 
 def _default_ws_connect(url: str):  # pragma: no cover — echte Netzverbindung
@@ -273,14 +491,17 @@ class UpDownRecorder:
                  path: Path = DATA_PATH, poll_s: float = 0.5,
                  gamma: GammaClient | None = None,
                  books: BookClient | None = None,
-                 ticker: CoinbaseTicker | None = None):
-        self.assets = assets or list(ASSET_PRODUCTS)
+                 ticker: MultiExchangeTicker | None = None,
+                 chainlink: ChainlinkPolygonRef | None = None):
+        self.assets = assets or list(ASSETS)
         self.path = path
         self.poll_s = poll_s
         self.gamma = gamma or GammaClient()
         self.books = books or BookClient()
-        self.ticker = ticker or CoinbaseTicker(
-            [ASSET_PRODUCTS[a] for a in self.assets])
+        self.ticker = ticker or MultiExchangeTicker(self.assets)
+        # Chainlink-Referenz optional: None schaltet die on-chain-Spalte ab.
+        self.chainlink = (chainlink if chainlink is not None
+                          else ChainlinkPolygonRef(self.assets))
         # slug -> (asset, up_token, down_token, window_start); Marktmetadaten,
         # gecacht bis das Fenster endet (spart Gamma-Abrufe pro Tick).
         self._markets: dict[str, tuple] = {}
@@ -331,13 +552,20 @@ class UpDownRecorder:
         if not self._markets:
             return 0
 
-        # Referenz-Startpreis je Fenster einmalig am Start erfassen.
+        # Referenz-Startpreise je Fenster einmalig am Start erfassen
+        # (Börsen-Median UND Chainlink on-chain).
         for slug, (asset, _, _, ws) in self._markets.items():
             ref = self._refs.get(slug)
-            if ref and ref.ref_start is None and now >= ws:
-                price, ts = self.ticker.get_price(ASSET_PRODUCTS[asset])
-                if price is not None:
-                    ref.ref_start, ref.ref_start_ts = price, ts
+            if not ref or now < ws:
+                continue
+            if ref.ref_start is None:
+                med, ts, _n, _px = self.ticker.snapshot(asset, now)
+                if med is not None:
+                    ref.ref_start, ref.ref_start_ts = med, ts
+            if ref.chain_start is None:
+                cp, _cts = self.chainlink.get_price(asset)
+                if cp is not None:
+                    ref.chain_start = cp
 
         # Alle aktiven Token-Bücher in EINEM Batch holen.
         tokens: list[str] = []
@@ -353,7 +581,9 @@ class UpDownRecorder:
             if now < ws or now >= ws + WINDOW_S:
                 continue
             ref = self._refs.get(slug)
-            price, ref_ts = self.ticker.get_price(ASSET_PRODUCTS[asset])
+            med, ref_ts, n_src, px = self.ticker.snapshot(asset, now)
+            cp, c_upd = self.chainlink.get_price(asset)
+            c_age = (now - c_upd) if c_upd is not None else None
             ub, ua, uas = _top(obooks.get(up_t))
             db, da, das = _top(obooks.get(down_t))
             row = build_snapshot(
@@ -361,8 +591,10 @@ class UpDownRecorder:
                 up_token=up_t, down_token=down_t,
                 up_bid=ub, up_ask=ua, down_bid=db, down_ask=da,
                 up_ask_size=uas, down_ask_size=das,
-                ref_now=price, ref_ts=ref_ts,
-                ref_start=ref.ref_start if ref else None)
+                ref_now=med, ref_ts=ref_ts, ref_sources=n_src, px_sources=px,
+                ref_start=ref.ref_start if ref else None,
+                chain_price=cp, chain_age_s=c_age,
+                chain_start=ref.chain_start if ref else None)
             self._write(row)
             written += 1
 
@@ -432,12 +664,14 @@ class UpDownRecorder:
             # der ihn aus den Snapshot-Zeilen liest — aber ehrlich mitführen).
             ref = WindowRef(asset, ws)
             ref.ref_start = r.get("ref_start")
+            ref.chain_start = r.get("chain_start")
             self._refs[slug] = ref
             seen += 1
         return seen
 
     def run(self) -> None:  # pragma: no cover — Langläufer-Schleife
         self.ticker.start()
+        self.chainlink.start()
         n = self.backfill_refs_from_disk()
         log.info("Up/Down-Recorder gestartet (Assets: %s) -> %s "
                  "(%d unaufgelöste Fenster aus Datei reaktiviert)",
@@ -454,6 +688,7 @@ class UpDownRecorder:
                 self._stop.wait(max(0.0, self.poll_s - (time.time() - t0)))
         finally:
             self.ticker.stop()
+            self.chainlink.stop()
 
 
 def _top(book) -> tuple[float | None, float | None, float | None]:
@@ -529,11 +764,18 @@ def aggregate_updown(rows: list[dict], fee_rate: float = 0.0) -> dict:
         pnl = payout - ask - fee
         # Führt das Buch die Gewinnerseite? (mid der Wahrheits-Seite > 0.5)
         win_mid = r.get("up_mid") if truth == "up" else r.get("down_mid")
+        # DIREKTE Divergenz Börsen-Median vs Chainlink-on-chain: stimmt die
+        # Median-Richtung mit der Chainlink-Richtung überein? (nur wenn beide
+        # eine Meinung haben). So messen wir den Proxy-Fehler direkt, statt ihn
+        # nur aus Fehltreffern gegen das Endergebnis abzuleiten.
+        chain_pred = r.get("chain_pred")
+        chain_has = chain_pred in ("up", "down")
 
         d = buckets.setdefault(b, {"n": 0, "correct": 0, "ask_sum": 0.0,
                                    "pnl_sum": 0.0, "book_leads": 0,
                                    "book_n": 0, "size_sum": 0.0, "size_n": 0,
-                                   "windows": set()})
+                                   "windows": set(), "chain_n": 0,
+                                   "chain_agree": 0})
         d["n"] += 1
         d["windows"].add(slug)
         d["correct"] += int(correct)
@@ -545,6 +787,9 @@ def aggregate_updown(rows: list[dict], fee_rate: float = 0.0) -> dict:
         if win_mid is not None:
             d["book_n"] += 1
             d["book_leads"] += int(win_mid > 0.5)
+        if chain_has:
+            d["chain_n"] += 1
+            d["chain_agree"] += int(chain_pred == pred)
 
     out_buckets = {}
     for b in sorted(buckets):
@@ -560,6 +805,8 @@ def aggregate_updown(rows: list[dict], fee_rate: float = 0.0) -> dict:
             "ev": d["pnl_sum"] / n if n else None,
             "book_leads_winner": (d["book_leads"] / d["book_n"]
                                   if d["book_n"] else None),
+            "chain_agree": (d["chain_agree"] / d["chain_n"]
+                            if d["chain_n"] else None),
         }
     return {
         "windows_resolved": len(outcomes),

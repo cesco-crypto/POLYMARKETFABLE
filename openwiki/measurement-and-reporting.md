@@ -24,10 +24,18 @@ braucht die Gegenfrage «Wie könnte diese Zahl lügen?» (/CLAUDE.md).
 - `updown.py` — UpDownRecorder (RISIKOFREI, handelt nicht): vermisst den
   Spät-Fenster-Latenz-Edge der 5-Min BTC/ETH/SOL-Up/Down-Märkte. Diese
   Märkte lösen nach dem **Chainlink**-Data-Stream auf (nicht Binance/
-  Coinbase-Spot — steht wörtlich in der Marktbeschreibung). Der Recorder
-  loggt Coinbase-Spot (handelbarer Proxy) gegen das Polymarket-Orderbuch
-  nach `data/updown.jsonl` und trägt nach Fensterschluss das echte
-  Ergebnis aus Gamma `outcomePrices` nach. Slug-Muster
+  Coinbase-Spot — steht wörtlich in der Marktbeschreibung). Das Live-Signal
+  ist der **Median aus Coinbase-WS + Kraken-WS + Binance.us-REST**
+  (`MultiExchangeTicker`) — Chainlink ist selbst ein Median vieler Quellen,
+  ein Börsen-Median nähert den Oracle also besser an als eine Börse und ist
+  robuster gegen einen hängenden Feed. Zusätzlich pollt `ChainlinkPolygonRef`
+  die **on-chain Chainlink-Aggregatoren auf Polygon** (gratis über web3,
+  publicnode-RPC) als zweite Referenz — so wird die Divergenz Median↔Chainlink
+  DIREKT gemessen (`chain_agree`), nicht nur aus Fehltreffern abgeleitet.
+  ACHTUNG: der on-chain-Aggregator (Heartbeat ~15-30s) ist NICHT der
+  Low-Latency-Data-Stream, der final auflöst. Der Recorder loggt das alles
+  gegen das Polymarket-Orderbuch nach `data/updown.jsonl` und trägt nach
+  Fensterschluss das echte Ergebnis aus Gamma `outcomePrices` nach. Slug-Muster
   `{btc,eth,sol}-updown-5m-<fensterstart_unix>`, Ergebnis = Up, wenn der
   Chainlink-Preis am Ende ≥ am Start. Start: `updown-record`,
   Auswertung: `updown-report [--fee-rate 0.07]`. Der Report bucketet nach

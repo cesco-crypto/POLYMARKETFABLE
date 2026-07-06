@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from polybot.updown import (WINDOW_S, UpDownRecorder, active_window_starts,
-                            aggregate_updown, build_snapshot,
+                            aggregate_updown, build_snapshot, median_price,
                             outcome_from_prices, predict_direction, slugs_for,
                             window_start_from_slug)
 
@@ -171,11 +171,26 @@ class _FakeBooks:
 
 
 class _FakeTicker:
+    """Fake-MultiExchangeTicker: liefert immer denselben Median, 1 Quelle."""
     def __init__(self, price):
         self._price = price
 
-    def get_price(self, product):
-        return self._price, 1000.0
+    def snapshot(self, asset, now=None):
+        return self._price, 1000.0, 1, {"coinbase": self._price}
+
+
+class _FakeChainlink:
+    def __init__(self, price=None):
+        self._price = price
+
+    def get_price(self, asset):
+        return (self._price, 1000.0) if self._price is not None else (None, None)
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
 
 
 class _Book:
@@ -196,8 +211,9 @@ def test_recorder_tick_writes_snapshot(tmp_path):
     books = _FakeBooks({"U": _Book(0.40, 0.42), "D": _Book(0.58, 0.60)})
     rec = UpDownRecorder(assets=["btc"], path=tmp_path / "updown.jsonl",
                          gamma=gamma, books=books,
-                         ticker=_FakeTicker(101.0))
-    # now mitten im Fenster (ws=800, Ende 1100); Startpreis wird erfasst.
+                         ticker=_FakeTicker(101.0),
+                         chainlink=_FakeChainlink(100.5))
+    # now mitten im Fenster (Ende ws+300); Startpreise werden erfasst.
     n = rec.tick(now=ws + 250)
     assert n == 1
     lines = (tmp_path / "updown.jsonl").read_text().strip().splitlines()
@@ -206,7 +222,11 @@ def test_recorder_tick_writes_snapshot(tmp_path):
     assert snap["asset"] == "btc" and snap["slug"] == slug
     assert snap["up_ask"] == 0.42
     assert snap["up_ask_size"] == 100.0   # Tiefe am besten Ask mitprotokolliert
-    assert snap["ref_start"] == 101.0     # am Fensterstart erfasst
+    assert snap["ref_start"] == 101.0     # Median am Fensterstart erfasst
+    assert snap["ref_sources"] == 1
+    assert snap["chain_price"] == 100.5   # Chainlink-on-chain mitprotokolliert
+    assert snap["chain_start"] == 100.5   # am Fensterstart erfasst
+    assert snap["pred"] == "flat"         # Median 101.0 == ref_start 101.0
 
 
 def test_recorder_sweeps_resolution(tmp_path):
@@ -216,7 +236,8 @@ def test_recorder_sweeps_resolution(tmp_path):
                        resolutions={slug: ["1", "0"]})
     books = _FakeBooks({"U": _Book(0.9, 0.95), "D": _Book(0.05, 0.1)})
     rec = UpDownRecorder(assets=["btc"], path=tmp_path / "updown.jsonl",
-                         gamma=gamma, books=books, ticker=_FakeTicker(101.0))
+                         gamma=gamma, books=books, ticker=_FakeTicker(101.0),
+                         chainlink=_FakeChainlink())
     rec.tick(now=ws + 100)                # Fenster aktiv, Markt gecacht
     rec.tick(now=ws + WINDOW_S + 10)      # nach Schluss -> Resolution
     rows = [json.loads(l) for l in
@@ -240,7 +261,8 @@ def test_backfill_resolves_missed_windows(tmp_path):
     gamma = _FakeGamma({slug: {"clobTokenIds": json.dumps(["U", "D"])}},
                        resolutions={slug: ["0", "1"]})   # DOWN
     rec = UpDownRecorder(assets=["btc"], path=path, gamma=gamma,
-                         books=_FakeBooks({}), ticker=_FakeTicker(100.0))
+                         books=_FakeBooks({}), ticker=_FakeTicker(100.0),
+                         chainlink=_FakeChainlink())
     reactivated = rec.backfill_refs_from_disk()
     assert reactivated == 1
     rec._sweep_resolutions(now=ws + WINDOW_S + 100)
@@ -260,5 +282,36 @@ def test_backfill_skips_already_resolved(tmp_path):
                             "outcome": "up"}) + "\n")
     rec = UpDownRecorder(assets=["btc"], path=path,
                          gamma=_FakeGamma({}), books=_FakeBooks({}),
-                         ticker=_FakeTicker(100.0))
+                         ticker=_FakeTicker(100.0), chainlink=_FakeChainlink())
     assert rec.backfill_refs_from_disk() == 0     # bereits aufgelöst -> übersprungen
+
+
+def test_median_price():
+    now = 1000.0
+    # 3 frische Quellen -> echter Median
+    src = {"coinbase": (100.0, now), "kraken": (102.0, now - 1),
+           "binanceus": (101.0, now - 2)}
+    med, ts, n = median_price(src, now)
+    assert med == 101.0 and n == 3 and ts == now
+    # eine Quelle veraltet (>3s) -> fällt raus, Median der übrigen zwei
+    src2 = {"coinbase": (100.0, now), "kraken": (200.0, now - 10)}
+    med2, _ts2, n2 = median_price(src2, now)
+    assert med2 == 100.0 and n2 == 1     # Ausreißer-Feed vergiftet den Median NICHT
+    # alle veraltet -> None
+    med3, _t, n3 = median_price({"coinbase": (100.0, now - 99)}, now)
+    assert med3 is None and n3 == 0
+
+
+def test_aggregate_chain_agreement():
+    # Median sagt UP; Chainlink stimmt in einem Snapshot zu, im anderen nicht.
+    rows = [
+        {"kind": "resolution", "slug": "s1", "outcome": "up"},
+        {"kind": "snapshot", "slug": "s1", "seconds_to_close": 5.0,
+         "ref_stale": False, "pred": "up", "chain_pred": "up",
+         "up_ask": 0.6, "down_ask": 0.4, "up_mid": 0.55, "down_mid": 0.45},
+        {"kind": "snapshot", "slug": "s1", "seconds_to_close": 5.0,
+         "ref_stale": False, "pred": "up", "chain_pred": "down",
+         "up_ask": 0.6, "down_ask": 0.4, "up_mid": 0.55, "down_mid": 0.45},
+    ]
+    b = aggregate_updown(rows)["by_offset"][5]
+    assert b["chain_agree"] == 0.5        # 1 von 2 stimmt mit Chainlink überein
