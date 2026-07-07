@@ -48,43 +48,23 @@ def _quantize_price(price: float, tick: float, side: str) -> float:
     return round(min(max(q, tick), 1.0 - tick), 6)
 
 
-# Nachkommastellen des Betrags (Size*Preis) je Tick-Größe — gespiegelt aus
-# py_clob_client_v2 ROUNDING_CONFIG.amount. Bestimmt, wie fein der USDC-Betrag
-# einer Order sein darf, bevor der Order-Builder ihn (ver)rundet. WICHTIG: für
-# den häufigen Tick 0.01 sind es 4 Dezimalen, NICHT 2 — ein zu strenges Modell
-# verwirft sonst gültige, nur preis-schiefe Arbs (z.B. NO@0.897, Größe 6).
-_AMOUNT_DECIMALS = {
-    "0.1": 3, "0.01": 4, "0.005": 5, "0.0025": 6, "0.001": 5, "0.0001": 6,
-}
-
-
-def _amount_precision(tick: float) -> int:
-    """Erlaubte Nachkommastellen des Betrags (Size*Preis) für diesen Tick.
-
-    Spiegelt ROUNDING_CONFIG[tick].amount. Fallback 2 (streng/konservativ),
-    falls ein unbekannter Tick auftaucht.
-    """
-    key = ("%f" % tick).rstrip("0").rstrip(".")  # 0.010000 -> "0.01"
-    return _AMOUNT_DECIMALS.get(key, 2)
-
-
-def _marketable_size(size: float, price: float, side: str,
-                     tick: float = 0.01) -> float:
+def _marketable_size(size: float, price: float, side: str) -> float:
     """Größte Size <= size (Raster 0.01), deren Beträge die CLOB-Präzision einhalten.
 
-    FOK/FAK-Beine werden als Limit-Order gebaut: der Betrag Size*Preis (bei BUY
-    der Maker-USDC, bei SELL der Taker-USDC) darf max. `amount` Nachkommastellen
-    haben, und `amount` hängt vom Tick ab (ROUNDING_CONFIG): Tick 0.01 -> 4,
-    Tick 0.1 -> 3, Tick 0.001 -> 5 usw. Die Share-Menge selbst hat max. 2
-    Dezimalen (Raster 0.01). Der Preis ist hier bereits aufs Tick-Raster
-    quantisiert (max. 6 Nachkommastellen), daher exakt als Ganzzahl fassbar.
+    FOK/FAK prüft der Server als Market-Order (Live-Beleg 07.07., HTTP 400
+    "the market buy orders maker amount supports a max accuracy of 2 decimals,
+    taker amount a max of 4 decimals"): bei BUY darf der USDC-Betrag (Size*Preis
+    = Maker) max. 2 Nachkommastellen haben, bei SELL max. 4 (Size*Preis =
+    Taker); die Share-Menge selbst max. 2. Diese Regel gilt tick-UNABHÄNGIG —
+    der (verworfene) Versuch, sie aus dem Limit-Order-ROUNDING_CONFIG
+    abzuleiten (P6), führte zu Server-Ablehnungen und wurde zurückgenommen.
+    Der Preis ist hier bereits aufs Tick-Raster quantisiert (max. 6
+    Nachkommastellen), daher exakt als Ganzzahl fassbar.
     """
     p = int(round(price * 1_000_000))
     if p <= 0 or size <= 0:
         return 0.0
-    # Betrag = k/100 * p/1e6 = k*p/1e8 USDC; `amount` Dezimalen erlaubt
-    # => k*p muss Vielfaches von 10^(8 - amount) sein.
-    mod = 10 ** (8 - _amount_precision(tick))
+    mod = 1_000_000 if side == "BUY" else 10_000
     k = int(math.floor(size * 100 + 1e-9))
     while k > 0 and (k * p) % mod:
         k -= 1
@@ -824,7 +804,7 @@ class LiveBroker(Broker):
             price = _quantize_price(s.price, tick, s.side)
             size = round(s.size, 2)
             if otype != OrderType.GTC:
-                size = _marketable_size(size, price, s.side, tick)
+                size = _marketable_size(size, price, s.side)
                 if size <= 0:
                     return {"kind": "build_failed", "price": price,
                             "reason": "keine börsenkonforme Size"}
@@ -953,19 +933,17 @@ class LiveBroker(Broker):
         common: dict[str, float] = {}
         for g, legs in groups.items():
             try:
-                ticks = [float(self.client.get_tick_size(s.token_id))
-                         for s in legs]
                 prices = [
-                    int(round(_quantize_price(s.price, t, s.side) * 1_000_000))
-                    for s, t in zip(legs, ticks)
+                    int(round(_quantize_price(
+                        s.price, float(self.client.get_tick_size(s.token_id)),
+                        s.side) * 1_000_000))
+                    for s in legs
                 ]
             except Exception as e:  # noqa: BLE001 — dann prüft es der Server
                 log.warning("Gruppe %s: Tick-Abfrage für Size-Quantisierung "
                             "fehlgeschlagen: %s", g, e)
                 continue
-            # Betrags-Präzision hängt am Tick des jeweiligen Beins (ROUNDING_CONFIG):
-            # Tick 0.01 erlaubt 4 Dezimalen -> mod 10^4, NICHT 2 Dezimalen (10^6).
-            mods = [10 ** (8 - _amount_precision(t)) for t in ticks]
+            mods = [1_000_000 if s.side == "BUY" else 10_000 for s in legs]
             k = min(int(math.floor(s.size * 100 + 1e-9)) for s in legs)
             while k > 0 and any((k * p) % m for p, m in zip(prices, mods)):
                 k -= 1
@@ -1003,7 +981,7 @@ class LiveBroker(Broker):
             if otype != OrderType.GTC:
                 # FOK/FAK prüft der Server als Market-Order: Beträge müssen
                 # exakt aufs Präzisionsraster passen, sonst 400 "invalid amounts".
-                size = _marketable_size(size, price, s.side, tick)
+                size = _marketable_size(size, price, s.side)
                 if size <= 0:
                     log.warning("Order verworfen (%s): keine börsenkonforme "
                                 "Size für %s @%.6f", s.market_question[:40],

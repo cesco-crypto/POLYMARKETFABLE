@@ -40,14 +40,14 @@ maker/funder = Smart-Contract-Wallet, signiert mit dem EOA-Key.
 - Delayed Orders (In-play-Matching-Delay): 15s-Poll-Fenster
   (`DELAY_POLL_*`) — ein Cancel verliert sonst das Race gegen das
   Matching (Lehre vom ersten Live-Trade 05.07.).
-- `_quantize_fok_groups` / `_marketable_size`: CLOB-Betrags-Präzision auf
-  Size×Preis bei GLEICHER Stückzahl aller Beine. Die erlaubten Dezimalen
-  hängen am Tick (`_amount_precision`, gespiegelt aus
-  `py_clob_client_v2.ROUNDING_CONFIG`: Tick 0.01 → 4, 0.1 → 3, 0.001 → 5,
-  usw.), NICHT hart 2/4 (Befund 07.07.: die alte 2-Dezimal-Annahme verwarf
-  gültige preis-schiefe Arbs wie NO@0.897/Größe 6). Auf dem 0.01-Raster ist
-  Size×Preis stets ≤ 4 Dezimalen → dort wird nie getrimmt; der Trimm bleibt
-  nur defensiver Fallback (streng 2 Dez.) für unbekannte Ticks.
+- `_quantize_fok_groups` / `_marketable_size`: CLOB-Market-Order-Präzision auf
+  Size×Preis bei GLEICHER Stückzahl aller Beine. FOK/FAK prüft der Server als
+  Market-Order, tick-UNABHÄNGIG: BUY-Maker-USDC 2 Dezimalen, SELL-Taker-USDC 4
+  (Live-Beleg 07.07.: HTTP 400 „market buy orders maker amount supports a max
+  accuracy of 2 decimals"). Preis-schiefe Arbs (z.B. NO@0.897/Größe 6) sind
+  damit bei kleinen Limits NICHT platzierbar und werden korrekt übersprungen —
+  der Versuch, die Präzision tick-abhängig aus dem Limit-Order-ROUNDING_CONFIG
+  abzuleiten (P6), wurde vom Server widerlegt und zurückgenommen.
 - Reject-Cooldown je Token (`order_reject_cooldown_s`); fatale
   Konfig-Rejects («maker address not allowed») sperren bis Prozessende.
 - GTC-Reste werden über `_reconcile_pending` zu Tick-Beginn nachgebucht.
