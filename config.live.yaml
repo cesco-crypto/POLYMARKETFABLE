@@ -33,6 +33,10 @@ risk:
                                # 60s Schonfrist zum Bid verkaufen (Befund
                                # 05.07.: Delay-Races hinterlassen offene
                                # Richtungswetten). Frist > Poll-Fenster 15s.
+  parallel_arb_legs: true      # P5 (Befund 07.07.): beide Arb-Beine gleichzeitig
+                               # posten (Netzwerk parallel, Buchung seriell),
+                               # damit Bein 2 nicht am FOK-Race scheitert und
+                               # eine Waise (Verlustverkauf) hinterlässt.
   live_auto_merge: false       # AUS bis Merges als Deposit-Wallet-Batch laufen:
                                # die Token liegen nach dem V2-Flow im Deposit
                                # Wallet, ein Merge vom EOA würde nur fehlschlagen.
@@ -49,6 +53,10 @@ strategy:
   min_liquidity_usdc: 2000
   min_volume_24h_usdc: 500
   min_time_to_end_s: 300       # live noch defensiver als Paper (120s)
+  arb_depth_margin: 1.5        # Survivability-Filter (Befund 07.07.): nur
+                               # feuern, wenn BEIDE Ask-Level >= 1.5x unsere
+                               # Größe tragen -> Bein 2 übersteht den Race eher,
+                               # weniger Waisen/Bluten. Höher = noch defensiver.
   max_negrisk_events: 20
   max_negrisk_submarkets: 20
   use_stream: true

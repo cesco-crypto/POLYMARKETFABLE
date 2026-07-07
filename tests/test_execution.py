@@ -279,6 +279,42 @@ def test_livebroker_unwind_stellt_gefuelltes_bein_glatt():
     assert pf.realized_pnl == pytest.approx((0.29 - 0.30) * 10)
 
 
+# ---- LiveBroker: P5 Parallel-Beine ----------------------------------------
+
+def _parallel_broker(client, cooldown_s: float = 0.0) -> LiveBroker:
+    from polybot.config import BotConfig
+    broker = make_live_broker(client, cooldown_s)
+    cfg = BotConfig()
+    cfg.risk.parallel_arb_legs = True
+    broker.cfg = cfg
+    return broker
+
+
+def test_livebroker_parallel_beide_beine_fuellen():
+    client = FakeClobClient()          # FOK -> beide matched
+    broker = _parallel_broker(client)
+    pf = Portfolio(cash=100.0)
+    fills = broker.execute([arb_leg("t1"), arb_leg("t2")], {}, pf)
+    assert fills == 2
+    assert set(client.posted) == {"t1", "t2"}         # Reihenfolge egal (parallel)
+    assert OrderType.FAK not in client.posted_types    # kein Unwind nötig
+
+
+def test_livebroker_parallel_unwind_bei_orphan():
+    # Ein Bein füllt, das andere scheitert -> die Waise wird glattgestellt
+    # (genau der Live-Killer, den P5 seltener machen soll — aber wenn er
+    # doch passiert, muss weiter sauber unwound werden).
+    client = FakeClobClient(fail_tokens={"t2"})
+    broker = _parallel_broker(client)
+    pf = Portfolio(cash=100.0)
+    books = {"t1": OrderBook(token_id="t1", bids=[Level(0.29, 100)], asks=[])}
+    broker.execute([arb_leg("t1"), arb_leg("t2")], books, pf)
+    assert {"t1", "t2"} <= set(client.posted)
+    assert OrderType.FAK in client.posted_types        # Gegenorder zum Bid
+    assert pf.positions == {}                          # Waise glattgestellt
+    assert pf.realized_pnl == pytest.approx((0.29 - 0.30) * 10)
+
+
 # ---- LiveBroker: unklare POST-Zustände & Matching-Delay --------------------
 
 def test_livebroker_verifiziert_zustand_nach_post_exception():

@@ -724,6 +724,11 @@ class LiveBroker(Broker):
         # (CLOB-Präzisionsregeln für Market-Orders; Beine müssen gleich groß
         # bleiben, sonst bliebe ein ungehedgter Rest).
         signals = self._quantize_fok_groups(signals)
+        # P5: Arb-Beine PARALLEL posten (Netzwerk nebenläufig, Buchung seriell) —
+        # verkleinert das FOK-Race-Fenster zwischen Bein-1-Fill und Bein-2-POST.
+        _risk = getattr(getattr(self, "cfg", None), "risk", None)
+        if getattr(_risk, "parallel_arb_legs", False):
+            return fills + self._execute_parallel(signals, books, portfolio, fee_rates)
         # FOK sichert nur die Einzelorder, nicht die Arb-Gruppe: scheitert ein
         # Bein, dürfen die restlichen Beine der Gruppe nicht mehr raus.
         failed_groups: set[str] = set()
@@ -773,6 +778,133 @@ class LiveBroker(Broker):
                                                 portfolio, fee_rates)
             # outcome "pending": Order ruht im Buch — Fills kommen später
             # über _reconcile_pending, nicht als sofortige Buchung.
+        return fills
+
+    # ---- P5: Parallel-Beine (Netzwerk nebenläufig, Buchung seriell) ---------
+
+    def _post_only(self, s: Signal, otype, fee_rates: dict[str, float]) -> dict:
+        """Order bauen + posten OHNE jede Buchung/State-Mutation — thread-sicher.
+
+        Läuft in einem Worker-Thread; berührt weder Portfolio noch _pending/
+        _open_orders/Cooldowns. Rückgabe-Dict mit kind:
+        'posted' (resp+price), 'rejected' (definitive 400/403), 'unknown'
+        (Timeout/mehrdeutig, posted_at) oder 'build_failed'. Die serielle
+        Phase (_execute_group_parallel) wertet das aus und mutiert den State.
+        """
+        from py_clob_client_v2.clob_types import (OrderArgs, OrderType,
+                                                  PartialCreateOrderOptions)
+        from py_clob_client_v2.order_builder.constants import BUY, SELL
+        try:
+            tick = float(self.client.get_tick_size(s.token_id))
+            price = _quantize_price(s.price, tick, s.side)
+            size = round(s.size, 2)
+            if otype != OrderType.GTC:
+                size = _marketable_size(size, price, s.side)
+                if size <= 0:
+                    return {"kind": "build_failed", "price": price,
+                            "reason": "keine börsenkonforme Size"}
+            order = self.client.create_order(
+                OrderArgs(token_id=s.token_id, price=price, size=size,
+                          side=BUY if s.side == "BUY" else SELL),
+                options=PartialCreateOrderOptions(tick_size=None, neg_risk=s.neg_risk))
+        except Exception as e:  # noqa: BLE001 — nichts unterwegs
+            return {"kind": "build_failed", "price": s.price, "reason": str(e)}
+        posted_at = time.time()
+        try:
+            resp = self.client.post_order(order, otype)
+        except Exception as e:  # noqa: BLE001
+            if getattr(e, "status_code", None) in (400, 403):
+                return {"kind": "rejected", "price": price, "reason": str(e)}
+            return {"kind": "unknown", "price": price, "posted_at": posted_at}
+        if not isinstance(resp, dict):
+            return {"kind": "unknown", "price": price, "posted_at": posted_at}
+        if not resp.get("success"):
+            return {"kind": "rejected", "price": price, "reason": str(resp)}
+        return {"kind": "posted", "price": price, "resp": resp}
+
+    def _execute_group_parallel(self, legs: list[Signal], portfolio: Portfolio,
+                                fee_rates: dict[str, float]) -> tuple[int, list, bool]:
+        """Alle Beine EINER Gruppe: Netzwerk-POSTs parallel, Buchung seriell.
+
+        Rückgabe: (gebuchte Fills, Liste gematchter Fills, ein_Bein_scheiterte).
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        from py_clob_client_v2.clob_types import OrderType
+
+        results: list[dict | None] = [None] * len(legs)
+
+        def work(i: int) -> None:
+            try:
+                results[i] = self._post_only(legs[i], OrderType.FOK, fee_rates)
+            except Exception as e:  # noqa: BLE001 — Worker darf nie werfen
+                results[i] = {"kind": "build_failed", "price": legs[i].price,
+                              "reason": str(e)}
+
+        with ThreadPoolExecutor(max_workers=max(2, len(legs))) as ex:
+            for f in [ex.submit(work, i) for i in range(len(legs))]:
+                f.result()
+
+        fills = 0
+        matched: list[Fill] = []
+        failed = False
+        for s, res in zip(legs, results):
+            kind = (res or {}).get("kind", "build_failed")
+            if kind == "posted":
+                outcome, fill = self._book_response(
+                    s, res["resp"], res["price"], OrderType.FOK, portfolio, fee_rates)
+                if outcome == "matched" and fill:
+                    fills += 1
+                    matched.append(fill)
+                else:
+                    failed = True
+            elif kind == "rejected":
+                log.warning("Order abgelehnt (parallel, %s): %s",
+                            s.market_question[:40], res.get("reason"))
+                self._register_reject(s.token_id, str(res.get("reason")))
+                failed = True
+            elif kind == "unknown":
+                log.error("POST /order unklar (parallel, %s) — verifiziere",
+                          s.market_question[:40])
+                self._recover_unknown_state(s.token_id, res["posted_at"])
+                failed = True
+            else:  # build_failed
+                log.warning("Order-Aufbau fehlgeschlagen (parallel, %s): %s",
+                            s.market_question[:40], (res or {}).get("reason"))
+                failed = True
+        return fills, matched, failed
+
+    def _execute_parallel(self, signals: list[Signal], books: dict[str, OrderBook],
+                          portfolio: Portfolio, fee_rates: dict[str, float]) -> int:
+        """P5-Router: Gruppen parallel abwickeln, Einzel-Signale seriell."""
+        groups: dict[str, list[Signal]] = {}
+        singles: list[Signal] = []
+        for s in signals:
+            if s.group:
+                groups.setdefault(s.group, []).append(s)
+            else:
+                singles.append(s)
+        fills = 0
+        for group, legs in groups.items():
+            if self._fatal_reject is not None \
+                    or any(self._token_blocked(s.token_id) for s in legs):
+                log.debug("Gruppe %s übersprungen (Reject-Cooldown/Sperre)", group)
+                continue
+            n, matched, failed = self._execute_group_parallel(legs, portfolio, fee_rates)
+            fills += n
+            if failed and matched:
+                # Ein Bein gefüllt, ein anderes gescheitert -> Waise glattstellen.
+                fills += self._unwind_group(group, {group: matched}, books,
+                                            portfolio, fee_rates)
+        for s in singles:
+            if self._fatal_reject is not None or self._token_blocked(s.token_id):
+                continue
+            try:
+                from py_clob_client_v2.clob_types import OrderType
+                outcome, fill = self._submit_signal(s, OrderType.GTC, portfolio, fee_rates)
+                if outcome == "matched":
+                    fills += 1
+            except Exception as e:  # noqa: BLE001
+                log.error("Live-Order fehlgeschlagen (%s): %s", s.market_question[:40], e)
         return fills
 
     def _quantize_fok_groups(self, signals: list[Signal]) -> list[Signal]:

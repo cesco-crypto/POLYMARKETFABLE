@@ -57,6 +57,13 @@ class RiskConfig:
     # überdauern — sonst würde ein noch schwebendes Gegenbein fälschlich
     # verkauft. Nicht mit aktivem Market Making kombinieren (Inventar!).
     flatten_orphan_grace_s: float = 0.0
+    # Parallel-Beine (P5, Befund 07.07.2026): Arb-Beine einer Gruppe werden
+    # sequenziell gepostet — zwischen Bein-1-Fill und Bein-2-POST vergehen
+    # ~150-300ms, in denen Bein-2-Liquidität wegschnappt (FOK-Race -> Waise).
+    # true = Netzwerk-POSTs aller Beine PARALLEL abschicken (Buchung bleibt
+    # seriell/thread-sicher). Verkleinert das Race-Fenster. Default false
+    # (altes, sequenzielles Verhalten), damit der Live-Pfad opt-in bleibt.
+    parallel_arb_legs: bool = False
 
 
 @dataclass
@@ -99,6 +106,13 @@ class StrategyConfig:
     # Mindestgröße einer Order in Shares (Polymarket-Minimum ist meist 5);
     # Signale unterhalb dieser Größe werden von den Strategien verworfen.
     min_order_shares: float = 5.0
+    # Survivability-Filter (Komplement-Arb, Befund 07.07.2026): Der Live-Killer
+    # ist der FOK-Race — Bein 1 füllt, Bein 2 scheitert (Liquidität weg) ->
+    # Waise -> Verlustverkauf. Nur feuern, wenn BEIDE Ask-Level mindestens
+    # arb_depth_margin × unsere Größe tragen: dann übersteht Bein 2 den Race
+    # eher. 1.0 = altes Verhalten (nur Top-of-Book decken). >1 = Sicherheits-
+    # puffer (weniger Trades, aber weniger Orphans/Bluten).
+    arb_depth_margin: float = 1.0
     # Mindest-Restlaufzeit eines Marktes in Sekunden. Nach endDate bleiben
     # Bücher stale und untradeable (Validierungs-Befund 04.07.2026) — und
     # kurz vor dem Ende ist das Auflösungs-/Reject-Risiko am höchsten.

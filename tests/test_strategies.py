@@ -39,6 +39,32 @@ def test_complement_arb_findet_unterbewertetes_paar():
     assert signals[0].group == signals[1].group
 
 
+def test_complement_arb_survivability_filter():
+    # Edge da (0.55+0.40=0.95), aber NO-Bein ist dünn (Tiefe 20). Bei Marge 1.5×
+    # und Größe 40 (max_order/cost) muss der dünne NO das Signal killen.
+    cfg = BotConfig()
+    cfg.risk.max_order_usdc = 40.0
+    cfg.strategy.arb_depth_margin = 1.5
+    m = mk_market(1)
+    snap = MarketSnapshot(
+        markets=[m],
+        books={"yes1": mk_book("yes1", 0.55, ask_size=100),
+               "no1": mk_book("no1", 0.40, ask_size=20)},   # NO dünn
+    )
+    assert ComplementArb(cfg).generate(snap) == []          # gefiltert
+    # ohne Marge (1.0) feuert es (altes Verhalten), auf NO-Tiefe begrenzt
+    cfg.strategy.arb_depth_margin = 1.0
+    assert len(ComplementArb(cfg).generate(snap)) == 2
+    # tiefe Bücher überstehen die Marge
+    cfg.strategy.arb_depth_margin = 1.5
+    snap2 = MarketSnapshot(
+        markets=[m],
+        books={"yes1": mk_book("yes1", 0.55, ask_size=100),
+               "no1": mk_book("no1", 0.40, ask_size=100)},
+    )
+    assert len(ComplementArb(cfg).generate(snap2)) == 2
+
+
 def test_complement_arb_beruecksichtigt_taker_gebuehren():
     # Ohne Gebühren wäre Edge = 1 - 0.99 = 0.01 (genau an der Schwelle),
     # mit Taker-Gebühr (rate * p * (1-p) je Bein) fällt sie darunter.

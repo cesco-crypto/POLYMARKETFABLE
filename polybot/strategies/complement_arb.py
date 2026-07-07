@@ -65,6 +65,18 @@ class ComplementArb(Strategy):
             if size < min_shares:  # Mindestordergröße der Börse
                 continue
 
+            # Survivability-Filter (Befund 07.07.2026): der Live-Killer ist der
+            # FOK-Race — Bein 1 füllt, Bein 2 scheitert, weil seine Liquidität
+            # zwischen den zwei POSTs verschwindet -> Waise -> Verlustverkauf.
+            # Nur feuern, wenn BEIDE Ask-Level einen Sicherheitspuffer über
+            # unserer Größe tragen; dann übersteht Bein 2 den Race eher.
+            margin = getattr(self.cfg.strategy, "arb_depth_margin", 1.0)
+            if margin > 1.0 and (ya.size < size * margin or na.size < size * margin):
+                log.debug("Komplement-Arb übersprungen (dünne Tiefe): '%s' "
+                          "Größe %.0f, YES-Tiefe %.0f, NO-Tiefe %.0f, Marge %.1f×",
+                          m.question[:40], size, ya.size, na.size, margin)
+                continue
+
             group = f"comp:{m.condition_id[:12]}"
             log.info(
                 "Komplement-Arb: '%s' YES@%.3f + NO@%.3f = %.3f (Edge %.3f, Größe %.0f)",
