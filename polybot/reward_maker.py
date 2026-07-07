@@ -235,6 +235,46 @@ def replay_market(history: list[dict], daily_rate: float, band: float,
     }
 
 
+def split_history(history: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Historie zeitlich hälften: (in-sample, out-of-sample)."""
+    if len(history) < 4:
+        return history, []
+    mid_t = (history[0]["t"] + history[-1]["t"]) / 2
+    return ([p for p in history if p["t"] <= mid_t],
+            [p for p in history if p["t"] > mid_t])
+
+
+def walk_forward(entries: list[dict], grid: list[dict]) -> dict:
+    """Overfitting-Test: EINEN globalen Parametersatz auf der ersten Hälfte
+    wählen (bestes IS-Gesamt-Netto), dann BLIND auf der zweiten Hälfte messen.
+
+    entries: je Markt {daily_rate, band, comp, size, tick, history}. grid: Liste
+    von replay-kwargs (trend_window/trend_thresh/exit_quotes). Rückgabe: bester
+    Parametersatz + Gesamt-Netto IS/OOS + naives OOS + per-Markt.
+    """
+    def net(e, hist, kw):
+        if len(hist) < 2:
+            return 0.0
+        return replay_market(hist, e["daily_rate"], e["band"], e["comp"],
+                             e["size"], tick=e.get("tick", 0.01), **kw)["net"]
+
+    splits = [(e, *split_history(e["history"])) for e in entries]
+    is_total = {i: sum(net(e, IS, kw) for e, IS, _ in splits)
+                for i, kw in enumerate(grid)}
+    best_i = max(is_total, key=is_total.get)
+    best = grid[best_i]
+    naive = {"trend_window": 0, "trend_thresh": 0.0, "exit_quotes": False}
+    return {
+        "best_params": best,
+        "is_net": is_total[best_i],
+        "oos_net": sum(net(e, OOS, best) for e, _, OOS in splits),
+        "oos_net_naive": sum(net(e, OOS, naive) for e, _, OOS in splits),
+        "per_market": [{"label": e.get("label", "?"),
+                        "is": net(e, IS, best), "oos": net(e, OOS, best)}
+                       for e, IS, OOS in splits],
+    }
+
+
 @dataclass
 class MakerState:
     """Kumulativer Zustand eines Markts (persistiert über Neustarts)."""

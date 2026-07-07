@@ -7,7 +7,7 @@ import json
 from polybot.data.orderbook import Level, OrderBook
 from polybot.reward_maker import (MakerState, RewardMakerShadow, detect_fills,
                                   quote_prices, replay_market, reward_accrual,
-                                  round_tick)
+                                  round_tick, split_history, walk_forward)
 
 
 def test_quote_prices_within_band_and_tick():
@@ -145,6 +145,28 @@ def test_replay_depth_multiplier_cuts_rewards():
     lo_mult = replay_market(hist, 100, 0.045, 1000, 100, depth_multiplier=1.0)
     hi_mult = replay_market(hist, 100, 0.045, 1000, 100, depth_multiplier=3.0)
     assert hi_mult["rewards"] < lo_mult["rewards"]      # mehr Konkurrenz -> weniger Reward
+
+
+def test_split_history_halves_by_time():
+    h = [{"t": t, "p": 0.5} for t in (0, 10, 20, 30, 40)]
+    IS, OOS = split_history(h)
+    assert IS[-1]["t"] <= 20 and OOS[0]["t"] > 20
+    assert len(IS) + len(OOS) == len(h)
+
+
+def test_walk_forward_picks_is_best_and_reports_oos():
+    # Zwei Grid-Punkte; walk_forward muss den auf IS besseren wählen und dann
+    # OOS mit GENAU diesem messen (nicht neu optimieren).
+    h = [{"t": i * 3600, "p": p} for i, p in
+         enumerate([0.5, 0.44, 0.5, 0.44, 0.5, 0.44, 0.5, 0.44])]
+    entries = [{"label": "m", "daily_rate": 0, "band": 0.045, "comp": 1000,
+                "size": 100, "tick": 0.01, "history": h}]
+    grid = [{"trend_window": 0, "trend_thresh": 0.0, "exit_quotes": False},
+            {"trend_window": 2, "trend_thresh": 0.03, "exit_quotes": True}]
+    res = walk_forward(entries, grid)
+    assert res["best_params"] in grid
+    assert "oos_net" in res and "oos_net_naive" in res
+    assert len(res["per_market"]) == 1
 
 
 def _wl(tmp_path):

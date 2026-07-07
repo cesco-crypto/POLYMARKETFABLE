@@ -781,3 +781,38 @@ Meta „model-driven Microstructure-MM + Rewards" ist auf Polymarket für UNSER
 Setup (Laptop-Latenz, disjunkte Markt-/Reward-Klassen, dünne Reward-Dichte)
 nicht profitabel nachbaubar. Nächste ehrliche Optionen liegen beim Nutzer:
 grundlegend anderes Marktumfeld/Werkzeug, oder Zieldefinition anpassen.
+
+## KORREKTUR: „tot" war zu hart — Fokus-Matrix + Out-of-Sample (07.07.2026)
+
+Auf berechtigten Nutzer-Einwand das „tot"-Urteil zurückgezogen: es galt für
+die NAIVE Variante über ALLE 7 Märkte. Fokus-Matrix (14d, min_size, nur
+Range-Kandidaten) zeigte ein anderes Bild — mit Trend-Filter (tw24/th05) ist
+GPT-5.6 bei −4.6 (Break-even), WTI +1.5, Iran +13.1 (mit Exit). Zwei Märkte
+sogar netto positiv. Also NICHT pauschal tot.
+
+**Aber der entscheidende Test ist Out-of-Sample** (gegen Overfitting):
+`walk_forward` (neu, getestet) wählt EINEN globalen Parametersatz auf der
+ersten Hälfte (in-sample) und misst ihn BLIND auf der zweiten Hälfte. 5 Märkte
+mit ≥10d Historie:
+
+| | In-Sample (H1) | Out-of-Sample (H2) |
+|---|---|---|
+| Gewählte Variante (= naiv, tw=0) | **+68.8** | **−105.4** |
+| Naive Baseline | +68.8 | −105.4 |
+
+Per-Markt (IS → OOS): LeBron +57.9 → **−96.5**, WTI −21.5 → +4.0, GPT +59.8 →
++9.3, Iran −15.1 → +2.9, M80 −12.2 → −25.1.
+
+**Ehrliches Fazit:** Der Grid wählte auf IS die NAIVE Variante (der Trend-
+Filter half auf H1 nicht) — und deren IS-Plus (+69) kippte OOS auf **−105**.
+Einzelmärkte drehen zwischen den Hälften unvorhersehbar das Vorzeichen
+(LeBron +58 → −97). Das ist die Signatur von **KEINEM robusten Edge** — die
+14-Tage-Positiven waren regime-/rauschgetrieben, nicht wiederholbar. Der EINE
+Lichtblick: GPT-5.6 blieb in BEIDEN Hälften positiv (+59.8 / +9.3) — ein
+einzelner Range-Markt mit möglichem Mini-Edge, aber n=1 ist zu dünn zum
+Wetten.
+
+**Praktische Konsequenz = unverändert:** kein demonstrierbar wiederholbarer,
+skalierbarer Edge → kein Kapitaleinsatz gerechtfertigt. „Nicht robust bewiesen"
+statt „tot" — aber für die Kapitalentscheidung dasselbe Ergebnis. Sauber, per
+Out-of-Sample-Methodik, ohne einen Dollar Risiko.
