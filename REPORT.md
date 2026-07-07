@@ -539,3 +539,43 @@ Ausführungsrealität kippen kann. Nächster Schritt bleibt die Order-Latenz-
 Messung — sie entscheidet zwischen «knapp positiv» und «nicht nutzbar».
 Weiter messen über volle Tageszyklen (stabilisiert sich die Quote oder
 zerfällt sie weiter?).
+
+## Up/Down — 156-Fenster-Stichprobe (07.07.2026 ~05:07 UTC): Edge weiter zerfallen
+
+Über Nacht (bis 01:37 UTC, dann Container-Pause; Rohdaten auf Disk überlebt)
+weitere ~2h/56 Fenster dazu. Der Verfall setzt sich fort:
+
+| Stichprobe | T-20s acc | T-20s Polster | T-20s EV n. Fee |
+|---|---|---|---|
+| 45 Fenster | 94.7% | +5.4 pp | +0.049 |
+| 100 Fenster | 82.0% | +2.8 pp | +0.023 |
+| **156 Fenster** | **77.8%** | **+2.0 pp** | **+0.013** |
+
+Handelbares Band jetzt (nach 7% Fee): T-15s EV +0.008, T-20s +0.013,
+T-30s +0.020 — **Polster nur noch +1.4 bis +2.7 pp.** T-10s und T-45s+ sind
+negativ. Das Papier-Signal liegt damit UNTER jeder realistischen Ausführungs-
+Slippage; als Taker-Strategie ist es praktisch am Break-even.
+
+**Martingale-Hypothese (Nutzer) — jetzt DEFINITIV mit echter Stichprobe:**
+Bei 17 Verlusten (statt 2/7):
+
+| | Trefferquote |
+|---|---|
+| Basis | 88.5% |
+| nach GEWINN | 88.2% (n=136) |
+| **nach VERLUST** | **88.2% (n=17)** |
+
+Nach einem Verlust ist die Quote **exakt gleich** wie nach einem Gewinn und
+wie die Basis. **Die Ausgänge sind unabhängig — der Spielerfehlschluss ist
+empirisch bestätigt (nicht nur theoretisch).** «Nach Verlust grösser setzen»
+bringt NULL Zusatz-EV, nur Zusatz-Varianz. Erledigt.
+
+**Ehrliches Verdikt (Stand 156 Fenster):** Als TAKER auf dem Börsen-Median-
+Signal mit Laptop-Latenz ist dieser Edge zu dünn, um Ausführungskosten zu
+überleben — der Verfall über jede Stichproben-Vergrösserung spricht dafür,
+dass die frühen Samples Glück waren, nicht ein stabiler Edge. followsmart-
+wallets +45k sind so für uns NICHT nachbaubar. Zwei offene Auswege, bevor
+final geschlossen wird: (a) **Order-Latenz messen** (schliesst den Taker-Fall
+definitiv), (b) **Maker-Variante** prüfen — Gebote UNTER Fair posten und den
+Spread einnehmen statt am Ask zu zahlen (andere, evtl. bessere Ökonomie, aber
+mit Adverse-Selection-Risiko wie beim Reward-Farming-Track).
