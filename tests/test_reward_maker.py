@@ -125,6 +125,21 @@ def test_replay_trend_filter_cuts_adverse_fills():
     assert on["trading_pnl"] > off["trading_pnl"]
 
 
+def test_replay_exit_quotes_execute_sells():
+    # Exit-Asks feuern (verkaufen Inventar bei Gegenbewegung) und veraendern
+    # das End-Inventar gegenueber kaufen+halten. (Ob das PnL VERBESSERT, ist
+    # marktabhaengig und NICHT garantiert — Befund 07.07.: Exits verkaufen oft
+    # mit Verlust und brechen profitable Paare auf.)
+    hist = [{"t": i * 3600, "p": p} for i, p in enumerate([0.50, 0.44, 0.50])]
+    hold = replay_market(hist, 0, 0.045, 1000, 100, exit_quotes=False,
+                         fill_prob=1.0, adverse_ticks=0)
+    mm = replay_market(hist, 0, 0.045, 1000, 100, exit_quotes=True,
+                       fill_prob=1.0, adverse_ticks=0)
+    assert hold["sells_up"] == 0 and hold["sells_down"] == 0   # hold verkauft nie
+    assert mm["sells_up"] >= 1                                  # Exit verkauft UP
+    assert (mm["n_up"], mm["n_down"]) != (hold["n_up"], hold["n_down"])
+
+
 def test_replay_depth_multiplier_cuts_rewards():
     hist = [{"t": i * 86400, "p": 0.50} for i in range(3)]   # flach, nur Rewards
     lo_mult = replay_market(hist, 100, 0.045, 1000, 100, depth_multiplier=1.0)

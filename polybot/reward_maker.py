@@ -149,7 +149,8 @@ def replay_market(history: list[dict], daily_rate: float, band: float,
                   half_frac: float = 0.8, tick: float = 0.01,
                   fill_prob: float = 0.75, adverse_ticks: float = 1.0,
                   depth_multiplier: float = 3.0,
-                  trend_window: int = 0, trend_thresh: float = 0.03) -> dict:
+                  trend_window: int = 0, trend_thresh: float = 0.03,
+                  exit_quotes: bool = False) -> dict:
     """Backtest des Reward-MM über eine Mid-Preis-Historie (Speed statt Warten).
 
     Modell (realistisch, nur Käufe — keine nackten Shorts): je Bar posten wir
@@ -173,9 +174,9 @@ def replay_market(history: list[dict], daily_rate: float, band: float,
     """
     h = half_frac * band
     n_up = n_down = 0.0
-    cost = 0.0
+    cash = 0.0                                # Kauf: −, Verkauf: +
     rewards = 0.0
-    fu = fd = 0
+    fu = fd = su = sd = 0
     comp_eff = competing_notional * depth_multiplier
     penalty = adverse_ticks * tick
     fsize = quote_size * fill_prob            # nur Teilfüllung (Queue)
@@ -185,35 +186,48 @@ def replay_market(history: list[dict], daily_rate: float, band: float,
         dt = history[i + 1]["t"] - history[i]["t"]
         bid_up = up_mid - h
         bid_down = (1 - up_mid) - h
-        # TREND-FILTER: bei starkem Momentum das Gebot auf der FALLENDEN Seite
-        # zurückziehen (wir fangen sonst das fallende Messer). mom>0 = up steigt
-        # -> down fällt -> down-Gebot pausieren; mom<0 umgekehrt.
+        ask_up = up_mid + h
+        ask_down = (1 - up_mid) + h
+        # TREND-FILTER: bei starkem Momentum das ENTRY-Gebot der fallenden Seite
+        # zurückziehen (wir fangen sonst das fallende Messer).
         mom = 0.0
         if trend_window > 0 and i >= trend_window:
             mom = up_mid - history[i - trend_window]["p"]
         quote_up = not (trend_window > 0 and mom < -trend_thresh)
         quote_down = not (trend_window > 0 and mom > trend_thresh)
-        if quote_up and nxt <= bid_up and bid_up > 0:
-            n_up += fsize
-            cost += fsize * (bid_up + penalty)     # schlechterer Effektivpreis
-            fu += 1
-        elif quote_down and nxt >= up_mid + h and bid_down > 0:
-            n_down += fsize
-            cost += fsize * (bid_down + penalty)
-            fd += 1
+        if nxt <= bid_up and bid_up > 0:            # up fiel / down stieg
+            if quote_up:                            # UP-Bid füllt (kaufe UP)
+                n_up += fsize
+                cash -= fsize * (bid_up + penalty)
+                fu += 1
+            if exit_quotes and n_down > 0:          # DOWN-Ask füllt (verkaufe DOWN)
+                s = min(fsize, n_down)
+                n_down -= s
+                cash += s * (ask_down - penalty)
+                sd += 1
+        elif nxt >= up_mid + h and bid_down > 0:    # up stieg / down fiel
+            if quote_down:                          # DOWN-Bid füllt (kaufe DOWN)
+                n_down += fsize
+                cash -= fsize * (bid_down + penalty)
+                fd += 1
+            if exit_quotes and n_up > 0:            # UP-Ask füllt (verkaufe UP)
+                s = min(fsize, n_up)
+                n_up -= s
+                cash += s * (ask_up - penalty)
+                su += 1
         # Reward: unsere VOLLE ruhende Grösse qualifiziert (Fill-Anteil ändert
         # das nicht), aber gegen die hochskalierte Konkurrenz-Tiefe.
         rewards += reward_accrual(daily_rate, quote_size, comp_eff, dt)
     final = history[-1]["p"] if history else 0.5
     inv_value = n_up * final + n_down * (1 - final)
-    trading_pnl = inv_value - cost           # realisiert (Paare) + unrealisiert
+    trading_pnl = cash + inv_value           # realisiert (Round-Trips) + unrealisiert
     matched = min(n_up, n_down)
     span_days = ((history[-1]["t"] - history[0]["t"]) / 86400.0
                  if len(history) > 1 else 0.0)
     return {
         "rewards": rewards, "trading_pnl": trading_pnl,
         "net": trading_pnl + rewards,
-        "fills_up": fu, "fills_down": fd,
+        "fills_up": fu, "fills_down": fd, "sells_up": su, "sells_down": sd,
         "n_up": n_up, "n_down": n_down, "matched_pairs": matched,
         "excess_inv": abs(n_up - n_down),
         "span_days": span_days,

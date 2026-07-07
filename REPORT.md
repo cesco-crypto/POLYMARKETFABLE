@@ -739,3 +739,45 @@ abzustossen (Round-Trip-Spread). Ein vollwertiger zweiseitiger MM mit Exit-
 Quotes könnte den Überhang (die Hauptverlustquelle) senken. Das ist der eine
 Baustein, der die Ökonomie noch materiell ändern könnte — der nächste
 ehrliche Test, bevor Reward-MM final geschlossen wird.
+
+## Zweiseitiger MM mit Exit-Asks (07.07.2026) — hilft NICHT, Reward-MM geschlossen
+
+`replay_market(exit_quotes=True)`: vollwertiger MM, der Inventar bei Gegen-
+bewegung über Exit-Asks abstösst (verkaufe UP bei Anstieg, DOWN bei Fall).
+14-Tage-Backtest (konservativ):
+
+| Variante | Netto/14d | Rewards | Trading-PnL |
+|---|---|---|---|
+| kaufen+halten (Baseline) | −466 | +126 | −592 |
+| + Exit-Asks | **−514** (schlechter!) | +126 | −640 |
+| + Exit-Asks + Trend-Filter (tw6/th02) | **−239** | +126 | −365 |
+
+**Befund:** Exit-Asks allein machen es SCHLECHTER (−514 vs −466). Grund
+(beim Debuggen sichtbar): der Exit-Ask-Preis hängt am AKTUELLEN Mid, nicht am
+Einstand — auf den Bewegungen, die zählen, verkauft man mit VERLUST und bricht
+zudem profitable gematchte Paare auf (ein Paar UP+DOWN kostet 1−2h < 1 und
+zahlt 1 → der eigentliche passive Edge; Exits zerstören ihn). Nur zusammen mit
+dem Trend-Filter wird es besser (−239), aber **immer noch klar negativ.**
+
+**FINALES VERDIKT Reward-MM:** Über alle Varianten (naiv, Trend-Filter, Exit-
+Asks, Kombination) bleibt der beste Fall −239/14d. Der strukturelle Killer ist
+unverändert: die Reward-Obergrenze (~+126/14d ≈ +9/Tag bei min_size, bester
+Fall null Adverse Selection) ist zu klein, und Adverse Selection dominiert;
+beide skalieren ~linear mit Kapital → ein negativer Per-Kapital-Edge bleibt
+negativ. **Reward-Maker-Farming ist damit sauber gemessen und geschlossen.**
+
+## Gesamtstand aller gemessenen Strategien (07.07.2026)
+
+| Strategie | Status | Kernbefund |
+|---|---|---|
+| Taker-Komplement-Arb | 🔴 tot | 0 Gelegenheiten (Markt effizient) |
+| Up/Down Taker | 🔴 tot | Edge zerfällt auf ~Break-even, unter Slippage |
+| Up/Down Maker | 🔴 tot | Adverse Selection (fill_acc 59% statt 80%) |
+| Reward-MM (alle Varianten) | 🔴 tot | Reward-Dichte/Kapital zu klein, Adverse Sel. dominiert |
+
+Alle vier über ein einheitliches Mess-Instrumentarium (Recorder + Backtest +
+Shadow-Maker, 502 Tests) risikofrei widerlegt — kein Kapital verloren. Die
+Meta „model-driven Microstructure-MM + Rewards" ist auf Polymarket für UNSER
+Setup (Laptop-Latenz, disjunkte Markt-/Reward-Klassen, dünne Reward-Dichte)
+nicht profitabel nachbaubar. Nächste ehrliche Optionen liegen beim Nutzer:
+grundlegend anderes Marktumfeld/Werkzeug, oder Zieldefinition anpassen.
