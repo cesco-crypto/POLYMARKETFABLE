@@ -901,3 +901,41 @@ konservativen Annahmen (fill_prob 0.75, adverse_ticks, Tiefe×3).**
   Control). Verbleibende Unbekannte sind alle Realität-vs-Backtest → nächster
   Schritt ist LIVE-SHADOW auf den Low-Vol-Korb (echtes Buch, immer noch kein
   Kapital), dann Mikro-Kapital.
+
+## Kapazitäts-Analyse des Low-Vol-Universums (07.07.2026)
+
+Frage: Wie viel Kapital nimmt die Strategie auf, und was sind das an USDC/Tag?
+Scan: 1192 handelbare Reward-Märkte (rate≥15), davon ~17% low-vol (24 in 140
+gescannt). **Reward-Pool der 24 Low-Vol-Märkte: 6'369 USDC/Tag — dagegen schon
+9.3 Mio. USDC konkurrierende Maker-Liquidität in den Bändern.** Die Märkte sind
+also bereits ÜBERFÜLLT; der Pool wird unter viel Kapital geteilt.
+
+**Kapital → BRUTTO-Reward/Tag** (gierig, dichteste Märkte zuerst, max 1× Tiefe):
+
+| Budget | Brutto-Reward/Tag | Brutto-Yield |
+|---|---|---|
+| 10'000 | ~60 | 0.60%/Tag |
+| 100'000 | ~278 | 0.28%/Tag |
+| 500'000 | ~751 | 0.15%/Tag |
+| 1'000'000 | ~982 | 0.10%/Tag |
+| 5'000'000 | ~1'551 | 0.03%/Tag |
+
+**Der Kern-Befund — Dichte-vs-Kapazität-Tradeoff:** Der Yield ZERFÄLLT mit dem
+Kapital. Dichte Märkte (guter Yield) sind DÜNN (wenig Kapazität); tiefe Märkte
+(viel Kapazität) sind ÜBERFÜLLT (schlechter Yield). Und das ist BRUTTO — netto
+(minus Adverse Selection, Backtest ~0.12%/Tag auf den dichtesten) ist deutlich
+weniger.
+
+**Ehrliche Ertragserwartung (netto, grob):**
+- 6-stelliges Kapital (100-500k): **~50-200 USDC/Tag netto** — echtes
+  Nebeneinkommen, nicht 1000.
+- **1000/Tag netto braucht 7-stelliges Kapital** — und bei der Verdünnung/
+  Crowding auf dieser Ebene ist das Netto NICHT validiert (könnte gegen 0
+  gehen). Der Backtest bestätigte netto-positiv nur auf den DICHTEN (dünnen)
+  Märkten bei kleinem Einsatz.
+
+**Fazit der ganzen Kette:** Es gibt einen echten, robusten, netto-positiven
+Edge (bewiesen, p≈0) — aber seine KAPAZITÄT ist begrenzt. Bei realistischem
+Kapital ein solides Nebeneinkommen (zweistellig bis ~200/Tag); 1000/Tag bleibt
+kapitalseitig ausserhalb der validierten Zone. Ehrlich: ein guter kleiner
+Motor, kein 1000/Tag-Motor.
