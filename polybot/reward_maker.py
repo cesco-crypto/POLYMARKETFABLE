@@ -31,6 +31,9 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import requests
+
+from polybot.config import CLOB_HOST
 from polybot.data.orderbook import BookClient
 from polybot.rewards import qualifying_depth
 
@@ -39,6 +42,49 @@ log = logging.getLogger(__name__)
 WATCHLIST_PATH = Path("reward_watchlist.json")
 STATE_PATH = Path("data") / "reward_maker_state.json"
 LOG_PATH = Path("data") / "reward_maker.jsonl"
+
+
+def fetch_price_history(token: str, session: requests.Session | None = None,
+                        days: int = 14, fidelity: int = 5) -> list[dict]:
+    """Mid-Preis-Historie eines Tokens (CLOB /prices-history), [{t, p}]."""
+    http = session or requests.Session()
+    now = int(time.time())
+    try:
+        r = http.get(f"{CLOB_HOST}/prices-history",
+                     params={"market": token, "startTs": now - days * 86400,
+                             "endTs": now, "fidelity": fidelity}, timeout=30)
+        r.raise_for_status()
+        return [{"t": p["t"], "p": float(p["p"])} for p in r.json().get("history", [])]
+    except (requests.RequestException, ValueError, KeyError, TypeError) as e:
+        log.warning("prices-history für %s fehlgeschlagen: %s", token[:12], e)
+        return []
+
+
+def backtest_watchlist(watchlist_path: Path = WATCHLIST_PATH,
+                       days: int = 14, fidelity: int = 5,
+                       quote_size: float | None = None, half_frac: float = 0.8,
+                       session: requests.Session | None = None) -> list[dict]:
+    """Alle Watchlist-Märkte über die Preis-Historie backtesten (Speed-Pfad)."""
+    http = session or requests.Session()
+    books = BookClient(http)
+    data = json.loads(Path(watchlist_path).read_text())
+    out = []
+    for m in data.get("markets", []):
+        hist = fetch_price_history(m["up_token"], http, days=days, fidelity=fidelity)
+        if len(hist) < 2:
+            continue
+        # Konkurrenz-Tiefe aus dem AKTUELLEN Buch (historische unbekannt).
+        bk = books.get_book(m["up_token"])
+        mid = bk.midpoint if bk and bk.midpoint else hist[-1]["p"]
+        comp = qualifying_depth(bk, mid, float(m["max_spread"]))
+        size = quote_size if quote_size is not None else float(m["min_size"])
+        res = replay_market(hist, float(m["daily_rate"]),
+                            float(m["max_spread"]) / 100.0, comp, size, half_frac)
+        res["label"] = m.get("label", m["slug"])
+        res["competing_notional"] = comp
+        res["capital"] = size * mid + size * (1 - mid)
+        out.append(res)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +139,61 @@ def reward_accrual(daily_rate: float, our_notional: float,
         return 0.0
     share = our_notional / (competing_notional + our_notional)
     return daily_rate * share * dt_s / 86400.0
+
+
+def replay_market(history: list[dict], daily_rate: float, band: float,
+                  competing_notional: float, quote_size: float,
+                  half_frac: float = 0.8) -> dict:
+    """Backtest des Reward-MM über eine Mid-Preis-Historie (Speed statt Warten).
+
+    Modell (realistisch, nur Käufe — keine nackten Shorts): je Bar posten wir
+    ein Gebot auf UP zum up_mid−h UND auf DOWN zum (1−up_mid)−h (h=half_frac·
+    band). Bewegt sich der Mid zur nächsten Bar unter eines der Gebote, wird es
+    gefüllt (wir kaufen den Token zu unserem Limit). Gematchte UP+DOWN-Paare
+    lösen zu 1 USDC auf (Spread-Gewinn); der Überhang trägt Richtungsrisiko —
+    das ist die ADVERSE SELECTION (auf einem Trend kaufen wir wiederholt die
+    fallende Seite). Rewards pro-rata über die Zeit (Konkurrenz-Tiefe konstant
+    aus dem aktuellen Buch — historische Tiefe unbekannt, ehrlicher Vorbehalt).
+
+    history: [{t, p}] mit p = up_mid, zeitlich sortiert. Rückgabe: Kennzahlen
+    inkl. net = Endwert(Inventar zum letzten Mid) + Rewards − Kosten.
+    """
+    h = half_frac * band
+    n_up = n_down = 0.0
+    cost = 0.0
+    rewards = 0.0
+    fu = fd = 0
+    for i in range(len(history) - 1):
+        up_mid = history[i]["p"]
+        nxt = history[i + 1]["p"]
+        dt = history[i + 1]["t"] - history[i]["t"]
+        bid_up = up_mid - h
+        bid_down = (1 - up_mid) - h
+        if nxt <= bid_up and bid_up > 0:
+            n_up += quote_size
+            cost += quote_size * bid_up
+            fu += 1
+        elif nxt >= up_mid + h and bid_down > 0:   # down-Seite fällt -> down-Gebot füllt
+            n_down += quote_size
+            cost += quote_size * bid_down
+            fd += 1
+        our_notional = quote_size            # = qs·up_mid + qs·(1−up_mid)
+        rewards += reward_accrual(daily_rate, our_notional, competing_notional, dt)
+    final = history[-1]["p"] if history else 0.5
+    inv_value = n_up * final + n_down * (1 - final)
+    trading_pnl = inv_value - cost           # realisiert (Paare) + unrealisiert
+    matched = min(n_up, n_down)
+    span_days = ((history[-1]["t"] - history[0]["t"]) / 86400.0
+                 if len(history) > 1 else 0.0)
+    return {
+        "rewards": rewards, "trading_pnl": trading_pnl,
+        "net": trading_pnl + rewards,
+        "fills_up": fu, "fills_down": fd,
+        "n_up": n_up, "n_down": n_down, "matched_pairs": matched,
+        "excess_inv": abs(n_up - n_down),
+        "span_days": span_days,
+        "net_per_day": (trading_pnl + rewards) / span_days if span_days else 0.0,
+    }
 
 
 @dataclass

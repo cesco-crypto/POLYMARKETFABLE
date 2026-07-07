@@ -1266,6 +1266,46 @@ def cmd_reward_maker_shadow(cfg: BotConfig) -> None:
         sh.stop()
 
 
+def cmd_reward_maker_backtest(cfg: BotConfig, days: float | None = None) -> dict | None:
+    """Reward-Maker über die Preis-HISTORIE backtesten (Speed statt Tage warten)."""
+    from polybot.reward_maker import backtest_watchlist
+    d = int(days) if days else 14
+    rows = backtest_watchlist(days=d, fidelity=5)
+    if not rows:
+        console.print("[yellow]Keine Historie/Watchlist gefunden.[/yellow]")
+        return None
+    console.print(f"[bold]Reward-Maker-Backtest[/bold] — {d}d Historie (5-Min), "
+                  "Netto = Rewards − Adverse-Selection-PnL")
+    console.print("[dim]Modell: Gebote auf BEIDE Token, gefüllt wenn Mid darunter "
+                  "fällt; gematchte Paare = Spread, Überhang = Adverse Selection. "
+                  "Mid-only + Paper-Queue → OBERGRENZE; Konkurrenz-Tiefe konstant "
+                  "aus aktuellem Buch.[/dim]")
+    table = Table(title="Backtest je Watchlist-Markt")
+    for col in ("Markt", "Rewards", "Trading-PnL", "Netto", "Netto/Tag", "Fills↑↓",
+                "Überhang", "Tage"):
+        table.add_column(col, justify="right" if col != "Markt" else "left")
+    tot = {"rewards": 0.0, "trading_pnl": 0.0, "net": 0.0}
+    for r in rows:
+        tot["rewards"] += r["rewards"]; tot["trading_pnl"] += r["trading_pnl"]
+        tot["net"] += r["net"]
+        short = "*" if r["span_days"] < 2 else ""   # kurze Historie -> /Tag unsicher
+        table.add_row(r["label"][:22], f"{r['rewards']:+.2f}",
+                      f"{r['trading_pnl']:+.2f}", f"{r['net']:+.2f}",
+                      f"{r['net_per_day']:+.2f}{short}",
+                      f"{r['fills_up']}/{r['fills_down']}",
+                      f"{r['excess_inv']:.0f}", f"{r['span_days']:.1f}")
+    # GESAMT/Tag über das ANGEFORDERTE Fenster (nicht Summe der Per-Markt-Tage,
+    # die bei kurzen Spannen lügt).
+    port_npd = tot["net"] / d if d else 0.0
+    table.add_row("[bold]GESAMT[/bold]", f"{tot['rewards']:+.2f}",
+                  f"{tot['trading_pnl']:+.2f}", f"[bold]{tot['net']:+.2f}[/bold]",
+                  f"[bold]{port_npd:+.2f}[/bold]", "", "", f"{d}")
+    console.print(table)
+    console.print("[dim]* = <2d Historie, /Tag unsicher. Netto/Tag GESAMT > 0 = "
+                  "Rewards schlagen Adverse Selection (optimistischer Paper-Fall).[/dim]")
+    return {"rows": rows, "net_total": tot["net"], "net_per_day": port_npd}
+
+
 def cmd_reward_maker_report(cfg: BotConfig) -> dict | None:
     """Shadow-Maker auswerten: Netto = Rewards − Adverse-Selection-PnL je Markt."""
     from polybot.reward_maker import RewardMakerShadow
@@ -1347,7 +1387,7 @@ def main() -> None:
                                  "updown-record", "updown-report",
                                  "updown-maker-report", "rewards-scan",
                                  "reward-maker-shadow", "reward-maker-report",
-                                 "preflight"])
+                                 "reward-maker-backtest", "preflight"])
     # default=None: BotConfig.load unterscheidet so zwischen explizit gesetztem
     # --config (Datei MUSS existieren) und implizitem config.yaml-Fallback.
     parser.add_argument("--config", default=None)
@@ -1355,6 +1395,8 @@ def main() -> None:
                         help="Zielprofit in USDC/Tag für die Kapitalfrage (report)")
     parser.add_argument("--fee-rate", type=float, default=None,
                         help="Taker-Fee-Rate für den updown-report (Default 0.0)")
+    parser.add_argument("--days", type=float, default=None,
+                        help="Historien-Tage für den reward-maker-backtest (Default 14)")
     parser.add_argument("--execute", action="store_true",
                         help="preflight: Transaktionen wirklich senden "
                              "(Default: nur prüfen und PLAN drucken)")
@@ -1383,6 +1425,9 @@ def main() -> None:
         return
     if args.command == "reward-maker-report":
         cmd_reward_maker_report(cfg)
+        return
+    if args.command == "reward-maker-backtest":
+        cmd_reward_maker_backtest(cfg, days=args.days)
         return
     if args.command == "reward-maker-shadow":
         cmd_reward_maker_shadow(cfg)

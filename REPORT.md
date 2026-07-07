@@ -670,3 +670,34 @@ PnL** je Markt, persistiert (`data/reward_maker_state.json`, überlebt Neustart)
 - Live-Smoke ok: 7 Märkte, Rewards akkumulieren pro-rata (Bosnia/Maine am
   schnellsten wegen dünner Konkurrenz), Fills kommen über Zeit. Läuft jetzt im
   Dauer-Shadow; entscheidend ist das GESAMT-Netto über Tage.
+
+## Speed-Pfad: Backtest über Preis-Historie (07.07.2026) — naiver MM ist NEGATIV
+
+Statt Tage auf Live-Fills zu warten: `reward_maker.replay_market` +
+`backtest_watchlist` (`reward-maker-backtest`) simulieren den MM über die
+CLOB-`/prices-history` (5-Min-Bars, hier 14 Tage). Realistisches Modell:
+Gebote auf BEIDE Token, gefüllt wenn der Mid darunter fällt; gematchte Paare =
+Spread, Überhang = Adverse Selection. 14-Tage-Ergebnis (symmetrisch, skew=0):
+
+| Markt | Rewards | Trading-PnL | Netto | Fills↑↓ | Überhang |
+|---|---|---|---|---|---|
+| LeBron→Cavs | +95 | **−367** | −272 | 22/27 | 1000 |
+| GPT-5.6 Release | +192 | −155 | **+37** | 66/80 | 700 |
+| WTI Crude | +6 | −21 | −15 | 12/12 | 0 |
+| Iran Hormuz | +3 | −37 | −34 | 12/14 | 100 |
+| M80 ACE | +8 | −44 | −36 | 19/26 | 350 |
+| Bosnia* / Maine* | (nur 0.5d Historie — /Tag unsicher) |
+| **GESAMT (14d)** | **+346** | **−823** | **−476** | | |
+
+**Befund:** Naiver symmetrischer Reward-MM ist NETTO NEGATIV — Adverse
+Selection (−823) schlägt die Rewards (+346) rund **2:1**, sogar im
+optimistischen Paper-Fall (Mid-only, keine Queue). Das quantifiziert exakt die
+Kernwarnung der Flotte.
+
+**ABER — der entscheidende Hebel ist sichtbar:** Es ist markt-abhängig.
+TRENDENDE Märkte zerstören uns (LeBron 0.06→0.57 → −367; Maine imbalanced),
+RANGE-Märkte sind netto positiv (GPT-5.6 +37 über 14d, solide Stichprobe). Der
+symmetrische Maker verliert genau dann, wenn der Markt läuft — d.h. das
+Modell/der Skew muss Trends MEIDEN oder gegen das Momentum quoten. Die Baseline
+ist gemessen; der Wert eines Trend-Filters/Skews ist jetzt schnell backtestbar
+(Minuten pro Iteration statt Tage).

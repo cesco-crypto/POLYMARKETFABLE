@@ -6,7 +6,8 @@ import json
 
 from polybot.data.orderbook import Level, OrderBook
 from polybot.reward_maker import (MakerState, RewardMakerShadow, detect_fills,
-                                  quote_prices, reward_accrual, round_tick)
+                                  quote_prices, replay_market, reward_accrual,
+                                  round_tick)
 
 
 def test_quote_prices_within_band_and_tick():
@@ -63,6 +64,36 @@ def test_maker_state_roundtrip_spread_capture():
     st.apply_fill("sell", 0.52, 100)     # cash +52, inv 0
     assert st.inv == 0
     assert abs(st.trading_pnl(0.50) - 4.0) < 1e-9   # 4 Cent Spread * 100
+
+
+def test_replay_flat_market_only_rewards():
+    # Flacher Markt (0.50 konstant) -> keine Fills, nur Rewards.
+    hist = [{"t": i * 86400, "p": 0.50} for i in range(3)]
+    r = replay_market(hist, daily_rate=100, band=0.045, competing_notional=900,
+                      quote_size=100, half_frac=0.8)
+    assert r["fills_up"] == 0 and r["fills_down"] == 0
+    assert r["trading_pnl"] == 0.0
+    assert r["rewards"] > 0 and r["net"] == r["rewards"]
+
+
+def test_replay_trend_creates_adverse_selection():
+    # Aufwärtstrend 0.30->0.80: up steigt -> DOWN-Gebot füllt wiederholt teuer,
+    # DOWN endet wertlos -> stark negativer Trading-PnL (Adverse Selection).
+    hist = [{"t": i * 3600, "p": p} for i, p in
+            enumerate([0.30, 0.40, 0.50, 0.60, 0.70, 0.80])]
+    r = replay_market(hist, daily_rate=0, band=0.045, competing_notional=1000,
+                      quote_size=100, half_frac=0.8)
+    assert r["fills_down"] > 0          # DOWN wiederholt gekauft
+    assert r["trading_pnl"] < 0         # und es lief gegen uns
+    assert r["net"] < 0                 # ohne Rewards klar negativ
+
+
+def test_replay_rewards_can_offset_adverse_selection():
+    hist = [{"t": i * 3600, "p": p} for i, p in
+            enumerate([0.30, 0.40, 0.50, 0.60, 0.70, 0.80])]
+    lo = replay_market(hist, 0, 0.045, 1000, 100, 0.8)["net"]
+    hi = replay_market(hist, 100000, 0.045, 1000, 100, 0.8)["net"]
+    assert hi > lo                      # hohe Reward-Rate hebt Netto
 
 
 def _wl(tmp_path):
