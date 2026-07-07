@@ -1,0 +1,88 @@
+{
+  "markets": [
+    {
+      "label": "LeBron\u2192Cavaliers (Sport-Anker)",
+      "slug": "will-lebron-james-play-for-the-cleveland-cavaliers-in-2026-27",
+      "condition_id": "0xa4402219045f0fe392ea08a92d6f50b89419976d484aba5592d19bb65ea7b5c6",
+      "up_token": "67044318499994712064109988308237618254832029882233414790755517483383764496170",
+      "down_token": "94538197507034131724155137195976069393412480261383985946027902742107809025962",
+      "daily_rate": 1584.0,
+      "min_size": 200.0,
+      "max_spread": 4.5,
+      "min_tick": 0.001,
+      "question": "Will LeBron James play for the Cleveland Cavaliers in 2026-27?"
+    },
+    {
+      "label": "WTI Crude $65 (Fin-Anker)",
+      "slug": "will-wti-reach-80-in-july-2026-791",
+      "condition_id": "0x140c41f4491c885da7763e4111ca13fb169d907d73d3918429f98e1c1862aab9",
+      "up_token": "60806317326159607374282200707556294855206853468836223934335735983346661186527",
+      "down_token": "90291134224542495089473235347121675001610583981733905294889384605482241312765",
+      "daily_rate": 100.0,
+      "min_size": 50.0,
+      "max_spread": 4.5,
+      "min_tick": 0.01,
+      "question": "Will WTI Crude Oil (WTI) hit (HIGH) $80 in July?"
+    },
+    {
+      "label": "GPT-5.6 Release (AI Sweet-Spot)",
+      "slug": "will-gpt-5pt6-be-released-on-july-9-2026-20260623051440910",
+      "condition_id": "0x8ce53b95757fafff769752d9a881d4971bdfcf678bcb2088da982a0bf131d3dc",
+      "up_token": "100493021007625127457661690707348099033868434595114797839526642672073920111940",
+      "down_token": "57849095221105368075998773337606033989567573018142394970600482829178723897399",
+      "daily_rate": 471.0,
+      "min_size": 50.0,
+      "max_spread": 4.5,
+      "min_tick": 0.001,
+      "question": "Will GPT-5.6 be released on July 9, 2026?"
+    },
+    {
+      "label": "Bosnia High Rep (Geopol Sweet-Spot)",
+      "slug": "will-there-be-no-next-high-representative-for-bosnia-and-herzegovina-in-2026-20260705194510733",
+      "condition_id": "0x8473649eee1da24c9f13e479cce8c69a36b2d96b0833016579f7bab963cd7445",
+      "up_token": "63354729689233031858779716892686125251017823119854014469908485108588004311287",
+      "down_token": "111577205548909706711255151632271755241258065849986763488498663821504460480893",
+      "daily_rate": 223.0,
+      "min_size": 20.0,
+      "max_spread": 5.5,
+      "min_tick": 0.01,
+      "question": "Will there be no next High Representative for Bosnia and Herzegovina in 2026?"
+    },
+    {
+      "label": "Iran Hormuz-Geb\u00fchren (Geopol balanced)",
+      "slug": "will-there-be-between-20-and-40-average-daily-transits-of-the-strait-of-hormuz-on-june-30",
+      "condition_id": "0xfa1ece7c17bd380082dd792319353a8e76e9a235cd744304c2f010fd14632bd0",
+      "up_token": "68731608417334298843347238393992348306929022913474340755723550386867306891139",
+      "down_token": "2644766413331245539688486281375051409508228172393047844447690023448415133823",
+      "daily_rate": 18.0,
+      "min_size": 50.0,
+      "max_spread": 4.5,
+      "min_tick": 0.001,
+      "question": "Will there be between 20 and 40 average daily transits of the Strait of Hormuz on June 30?"
+    },
+    {
+      "label": "M80 ACE Stage 3 (Esport balanced)",
+      "slug": "will-m80-win-north-america-ace-stage-3-20260625200323697",
+      "condition_id": "0xc15862bc91e2ab887fa6c002543d13d497ff1cd9e4782a5914a1ca9306b8b325",
+      "up_token": "40116149879387255845837648588058245037908295988085741053686029115011734167321",
+      "down_token": "472104162763748456852436213699057644175282833296922260338786757843535298496",
+      "daily_rate": 350.0,
+      "min_size": 50.0,
+      "max_spread": 4.5,
+      "min_tick": 0.01,
+      "question": "Will M80 Win North America ACE Stage 3"
+    },
+    {
+      "label": "Maine Senate (Stresstest)",
+      "slug": "will-candidate-a-be-the-maine-senate-democratic-nominee-on-july-27-20260706182929399",
+      "condition_id": "0x50456e2e7c3255745217051c90241a036a508b2972ffcf6a6eb83779f1934661",
+      "up_token": "92257949995604386168666591829297332940242696592210490879190573221921075299609",
+      "down_token": "81368256751864171364185343974349993485093762905849059935724916947854983823753",
+      "daily_rate": 1000.0,
+      "min_size": 200.0,
+      "max_spread": 4.5,
+      "min_tick": 0.01,
+      "question": "Will Troy Jackson be the Maine Senate Democratic nominee on July 27?"
+    }
+  ]
+}

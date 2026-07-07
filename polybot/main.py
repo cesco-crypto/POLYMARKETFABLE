@@ -1253,6 +1253,57 @@ def cmd_updown_maker_report(cfg: BotConfig, fee_rate: float | None = None) -> di
     return agg
 
 
+def cmd_reward_maker_shadow(cfg: BotConfig) -> None:
+    """Watchlist-Shadow-Maker starten (RISIKOFREI, keine echten Orders)."""
+    from polybot.reward_maker import RewardMakerShadow
+    sh = RewardMakerShadow()
+    _install_signal_stop(sh.stop)
+    try:
+        sh.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        sh.stop()
+
+
+def cmd_reward_maker_report(cfg: BotConfig) -> dict | None:
+    """Shadow-Maker auswerten: Netto = Rewards − Adverse-Selection-PnL je Markt."""
+    from polybot.reward_maker import RewardMakerShadow
+    from polybot.data.orderbook import BookClient
+    sh = RewardMakerShadow()
+    # aktuelle Mids für die Inventar-Markierung holen
+    bc = BookClient()
+    toks = [m.up_token for m in sh.markets.values()]
+    books = bc.get_books(toks)
+    mids = {slug: (books[m.up_token].midpoint or 0.5)
+            for slug, m in sh.markets.items() if m.up_token in books}
+    rows = sh.summary(now_mid=mids)
+    console.print("[bold]Reward-Maker-Shadow-Report[/bold] — Netto = Rewards − "
+                  "Adverse-Selection-PnL (Inventar zum Mid markiert)")
+    console.print("[dim]Paper-Maker ohne Queue-Position → Fills/PnL sind "
+                  "OBERGRENZE. Rewards pro-rata (optimistisch). net>0 = Reward "
+                  "schlägt Adverse Selection.[/dim]")
+    table = Table(title="Netto-Yield je Watchlist-Markt")
+    for col in ("Markt", "Rewards", "Trading-PnL", "Netto", "Netto%", "Inv",
+                "MaxInv", "Käufe", "Verk."):
+        table.add_column(col, justify="right" if col != "Markt" else "left")
+    tot_r = tot_p = tot_n = 0.0
+    for r in rows:
+        tot_r += r["rewards"]; tot_p += r["trading_pnl"]; tot_n += r["net"]
+        ny = r["net_yield_pct"]
+        table.add_row(r["label"][:22], f"{r['rewards']:+.3f}",
+                      f"{r['trading_pnl']:+.3f}", f"{r['net']:+.3f}",
+                      "—" if ny is None else f"{ny:+.2f}%",
+                      f"{r['inv']:.0f}", f"{r['max_abs_inv']:.0f}",
+                      str(r["buys"]), str(r["sells"]))
+    table.add_row("[bold]GESAMT[/bold]", f"{tot_r:+.3f}", f"{tot_p:+.3f}",
+                  f"[bold]{tot_n:+.3f}[/bold]", "", "", "", "", "")
+    console.print(table)
+    console.print("[dim]Erst wenn GESAMT-Netto über längere Zeit klar positiv "
+                  "ist, über echte Size nachdenken.[/dim]")
+    return {"rows": rows, "net_total": tot_n}
+
+
 def cmd_rewards_scan(cfg: BotConfig) -> list | None:
     """Reward-Band-Scanner: reward-tragende Märkte nach Yield/Kapital ranken."""
     from polybot.rewards import scan
@@ -1294,7 +1345,9 @@ def main() -> None:
                         choices=["scan", "run", "status", "report",
                                  "cycle-report", "capture-report",
                                  "updown-record", "updown-report",
-                                 "updown-maker-report", "rewards-scan", "preflight"])
+                                 "updown-maker-report", "rewards-scan",
+                                 "reward-maker-shadow", "reward-maker-report",
+                                 "preflight"])
     # default=None: BotConfig.load unterscheidet so zwischen explizit gesetztem
     # --config (Datei MUSS existieren) und implizitem config.yaml-Fallback.
     parser.add_argument("--config", default=None)
@@ -1327,6 +1380,12 @@ def main() -> None:
         return
     if args.command == "rewards-scan":
         cmd_rewards_scan(cfg)
+        return
+    if args.command == "reward-maker-report":
+        cmd_reward_maker_report(cfg)
+        return
+    if args.command == "reward-maker-shadow":
+        cmd_reward_maker_shadow(cfg)
         return
     {"scan": cmd_scan, "run": cmd_run, "status": cmd_status,
      "cycle-report": cmd_cycle_report,

@@ -647,3 +647,26 @@ API-Befund, der den Bauplan formt:
   Inventarverlust) ist ungemessen — und genau der entscheidet. Nächster
   Schritt: Shadow-Maker auf diese Kandidaten (Reward-Einnahme minus Inventar-
   PnL nach simulierten Fills). NICHT handeln, bis netto positiv gemessen.
+
+## Watchlist-Shadow-Maker gebaut (07.07.2026) — misst Netto-Yield
+
+Gemeinsam mit dem Nutzer eine **7er-Watchlist** über das Risiko-Spektrum
+gewählt (`reward_watchlist.json`, committet): 2 Anker (LeBron-Cavs 104k tief /
+WTI-Crude, ausgewogen), 2 Sweet-Spots (GPT-5.6-Release / Bosnia-High-Rep,
+18-20% Yield), 2 balanced (Iran-Hormuz / M80-Esport), 1 Stresstest
+(Maine-Senate, 42% Yield lopsided — ist hoher Yield eine Falle?).
+
+`polybot/reward_maker.py` (neu, `reward-maker-shadow` / `-report`): simuliert
+zweiseitige Limit-Quotes INNERHALB des Reward-Bands (Mid ± 0.8·max_spread),
+verfolgt hypothetische Fills + Inventar (zum Mid markiert) und schreibt die
+pro-rata Reward-Einnahme gut. Ausgabe: **Netto = Rewards − Adverse-Selection-
+PnL** je Markt, persistiert (`data/reward_maker_state.json`, überlebt Neustart).
+
+- v1 quotet SYMMETRISCH (skew=0) → misst zuerst die BASELINE-Adverse-Selection;
+  der Wert eines Modell-Skews ist dann als Verbesserung messbar.
+- Ehrlichkeits-Vorbehalte (im Report ausgewiesen): Paper-Maker ohne Queue-
+  Position → Fills/PnL sind OBERGRENZE; Reward-Anteil pro-rata (optimistisch);
+  Inventar zum Mid markiert (kein Halten bis Auflösung).
+- Live-Smoke ok: 7 Märkte, Rewards akkumulieren pro-rata (Bosnia/Maine am
+  schnellsten wegen dünner Konkurrenz), Fills kommen über Zeit. Läuft jetzt im
+  Dauer-Shadow; entscheidend ist das GESAMT-Netto über Tage.
