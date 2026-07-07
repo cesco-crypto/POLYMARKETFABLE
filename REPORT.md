@@ -614,3 +614,36 @@ eine ZUSÄTZLICHE Einnahme (die Reward-Zahlungen), die die Adverse-Selection-
 Verluste evtl. überkompensiert. Genau das — und nur das — bleibt als
 kapital-skalierbarer Weg zu messen, mit denselben Werkzeugen (Shadow-Maker +
 Inventar-PnL), bevor Kapital fliesst.
+
+## Strategie-Pivot zu Reward-Maker-Farming (07.07.2026) — Kapital freigegeben
+
+Nutzer hat mehr Kapital freigegeben (Ziel bleibt 1000/Tag). Entscheidender
+API-Befund, der den Bauplan formt:
+
+- **Die 5-Min-Up/Down-Märkte zahlen NULL LP-Rewards** (0 von 7000 reward-
+  tragenden Märkten sind updown, live via CLOB `/sampling-markets` geprüft).
+  Die reward-tragenden Märkte sind LÄNGERE Politik/Sport/AI-Release-Märkte
+  OHNE schnellen Spot-Oracle-Edge. → Die «stapelbare Hybrid» (Microstructure
+  + Rewards auf EINEM Markt) ist auf Polymarket NICHT baubar; die Ertrags-
+  quellen wohnen auf disjunkten Marktklassen. Wahl erzwungen: Reward-MM
+  (kapital-skalierbar) statt Up/Down-Microstructure (dünn).
+
+- **`polybot/rewards.py` (neu) — Reward-Band-Scanner** (`rewards-scan`):
+  paginiert `/sampling-markets`, filtert handelbar (kein in-play, End > 1h),
+  schätzt **Yield%/Tag = Tagesrate / Konkurrenz-Tiefe im Band** (Rewards sind
+  pro-rata). Der min_capital-Boden entlarvt das «leeres Band = absurder
+  Yield»-Trugbild. Live-Erstlauf (Auszug):
+
+  | Yield%/Tag | Rate USDC/Tag | Band-Tiefe USDC | Markt |
+  |---|---|---|---|
+  | 280.0 | 280 | **0** ⚠️ | leeres Band (Trugbild, korrekt geflaggt) |
+  | 20.9 | 900 | 4'317 | Maine Senate Dem |
+  | 5.7 | 430 | 7'498 | GPT-5.6 release |
+  | 3.8 | 583 | 15'345 | LeBron plays for… |
+
+  Auf TIEFEN, kapital-aufnahmefähigen Bändern **~4-6%/Tag BRUTTO** — das ist
+  arithmetisch 1000/Tag-fähig bei ~20-30k Kapital über mehrere Bänder. ABER:
+  das ist BRUTTO (nur die Reward-Zahlung). Der Netto-Term (Adverse Selection +
+  Inventarverlust) ist ungemessen — und genau der entscheidet. Nächster
+  Schritt: Shadow-Maker auf diese Kandidaten (Reward-Einnahme minus Inventar-
+  PnL nach simulierten Fills). NICHT handeln, bis netto positiv gemessen.

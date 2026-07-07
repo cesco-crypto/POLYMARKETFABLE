@@ -1253,6 +1253,31 @@ def cmd_updown_maker_report(cfg: BotConfig, fee_rate: float | None = None) -> di
     return agg
 
 
+def cmd_rewards_scan(cfg: BotConfig) -> list | None:
+    """Reward-Band-Scanner: reward-tragende Märkte nach Yield/Kapital ranken."""
+    from polybot.rewards import scan
+    ranked = scan(min_time_to_end_s=3600.0, top_book=40)
+    if not ranked:
+        console.print("[yellow]Keine reward-tragenden Märkte gefunden.[/yellow]")
+        return None
+    console.print(f"[bold]Reward-Band-Scanner[/bold] — Top-40 handelbare "
+                  "reward-tragende Märkte nach geschätztem Yield/Kapital")
+    console.print("[dim]Yield%/Tag = Tagesrate / Konkurrenz-Tiefe im Band (bei "
+                  "kleinem Einsatz). Hoher Yield auf ~0 Tiefe = Warnsignal (Band "
+                  "leer WEIL Maker abgeschossen werden). NUR Kandidaten — Netto "
+                  "erst nach Shadow-Maker-Messung (Adverse Selection).[/dim]")
+    table = Table(title="Reward-Märkte")
+    for col in ("Yield%/Tag", "Rate USDC/Tag", "Band-Tiefe USDC", "MaxSpread",
+                "MinSize", "Markt"):
+        table.add_column(col, justify="right" if col != "Markt" else "left")
+    for r in ranked[:25]:
+        table.add_row(f"{r.yield_pct_day:.2f}", f"{r.rm.daily_rate:.1f}",
+                      f"{r.depth_notional:.0f}", f"{r.rm.max_spread:.1f}c",
+                      f"{r.rm.min_size:.0f}", r.rm.question[:48])
+    console.print(table)
+    return ranked
+
+
 def _install_signal_stop(stop_fn):
     """SIGTERM/SIGINT sauber in stop_fn umleiten (Container-Shutdown)."""
     import signal
@@ -1269,7 +1294,7 @@ def main() -> None:
                         choices=["scan", "run", "status", "report",
                                  "cycle-report", "capture-report",
                                  "updown-record", "updown-report",
-                                 "updown-maker-report", "preflight"])
+                                 "updown-maker-report", "rewards-scan", "preflight"])
     # default=None: BotConfig.load unterscheidet so zwischen explizit gesetztem
     # --config (Datei MUSS existieren) und implizitem config.yaml-Fallback.
     parser.add_argument("--config", default=None)
@@ -1299,6 +1324,9 @@ def main() -> None:
         return
     if args.command == "updown-maker-report":
         cmd_updown_maker_report(cfg, fee_rate=args.fee_rate)
+        return
+    if args.command == "rewards-scan":
+        cmd_rewards_scan(cfg)
         return
     {"scan": cmd_scan, "run": cmd_run, "status": cmd_status,
      "cycle-report": cmd_cycle_report,
