@@ -1213,6 +1213,46 @@ def cmd_updown_report(cfg: BotConfig, fee_rate: float | None = None) -> dict | N
     return agg
 
 
+def cmd_updown_maker_report(cfg: BotConfig, fee_rate: float | None = None) -> dict | None:
+    """Shadow-Maker-Replay: ruhende Gebote statt Taker-Kauf — netto nach
+    Adverse Selection? Nutzt die bereits aufgezeichneten Orderbuch-Zeitreihen."""
+    from polybot.updown import (DATA_PATH, aggregate_shadow_maker,
+                                aggregate_updown, load_rows)
+    rows = load_rows(DATA_PATH)
+    if not rows:
+        console.print(f"[yellow]Keine Up/Down-Daten in {DATA_PATH}.[/yellow]")
+        return None
+    rate = fee_rate if fee_rate is not None else 0.0
+    agg = aggregate_shadow_maker(rows, maker_fee=rate)
+    taker = aggregate_updown(rows, fee_rate=0.07)["by_offset"]
+    console.print(f"[bold]Shadow-Maker-Report[/bold] — {agg['windows_resolved']} "
+                  f"Fenster, Maker-Fee {agg['maker_fee']:.3f}")
+    console.print("[dim]Ruhendes Gebot auf der Signal-Seite zum best_bid; gefüllt, "
+                  "wenn der Ask später darauf fällt. fill_acc << Taker-acc = "
+                  "Adverse Selection. ACHTUNG: Paper-Maker ohne Queue-Position → "
+                  "fill_rate/EV sind OBERGRENZE, kein Realwert.[/dim]")
+    table = Table(title="Maker je Sekunden vor Fensterschluss")
+    for col in ("≤ Sek.", "Fenster", "Fill-Rate", "Fill-Treffer", "Ø Entry",
+                "EV/Fill", "EV/Quote", "vgl. Taker-EV"):
+        table.add_column(col, justify="right" if col != "≤ Sek." else "left")
+    for b in sorted(agg["by_offset"]):
+        d = agg["by_offset"][b]
+        def pct(x):
+            return "—" if x is None else f"{x * 100:.1f}%"
+        def num(x, s="{:+.4f}"):
+            return "—" if x is None else s.format(x)
+        tk = taker.get(b, {}).get("ev")
+        table.add_row(f"{b}s", str(d["windows"]), pct(d["fill_rate"]),
+                      pct(d["fill_acc"]),
+                      num(d["avg_entry"], "{:.3f}"), num(d["ev_per_fill"]),
+                      num(d["ev_per_quote"]), num(tk))
+    console.print(table)
+    console.print("[dim]EV/Quote > 0 = Maker lohnt (unerfüllte Quotes = 0 gezählt). "
+                  "EV/Fill vs Taker-EV zeigt, ob der billigere Einstieg die "
+                  "Adverse Selection schlägt.[/dim]")
+    return agg
+
+
 def _install_signal_stop(stop_fn):
     """SIGTERM/SIGINT sauber in stop_fn umleiten (Container-Shutdown)."""
     import signal
@@ -1228,7 +1268,8 @@ def main() -> None:
     parser.add_argument("command",
                         choices=["scan", "run", "status", "report",
                                  "cycle-report", "capture-report",
-                                 "updown-record", "updown-report", "preflight"])
+                                 "updown-record", "updown-report",
+                                 "updown-maker-report", "preflight"])
     # default=None: BotConfig.load unterscheidet so zwischen explizit gesetztem
     # --config (Datei MUSS existieren) und implizitem config.yaml-Fallback.
     parser.add_argument("--config", default=None)
@@ -1255,6 +1296,9 @@ def main() -> None:
         return
     if args.command == "updown-report":
         cmd_updown_report(cfg, fee_rate=args.fee_rate)
+        return
+    if args.command == "updown-maker-report":
+        cmd_updown_maker_report(cfg, fee_rate=args.fee_rate)
         return
     {"scan": cmd_scan, "run": cmd_run, "status": cmd_status,
      "cycle-report": cmd_cycle_report,

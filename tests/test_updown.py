@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 
 from polybot.updown import (WINDOW_S, UpDownRecorder, active_window_starts,
-                            aggregate_updown, build_snapshot, median_price,
-                            outcome_from_prices, predict_direction, slugs_for,
+                            aggregate_shadow_maker, aggregate_updown,
+                            build_snapshot, median_price, outcome_from_prices,
+                            predict_direction, slugs_for,
                             window_start_from_slug)
 
 
@@ -315,3 +316,51 @@ def test_aggregate_chain_agreement():
     ]
     b = aggregate_updown(rows)["by_offset"][5]
     assert b["chain_agree"] == 0.5        # 1 von 2 stimmt mit Chainlink überein
+
+
+def _mk_snap(slug, stc, pred, up_bid, up_ask, down_bid, down_ask):
+    return {"kind": "snapshot", "slug": slug, "seconds_to_close": stc,
+            "pred": pred, "up_bid": up_bid, "up_ask": up_ask,
+            "down_bid": down_bid, "down_ask": down_ask}
+
+
+def test_shadow_maker_fill_and_win():
+    # Signal UP; wir posten Gebot auf UP zum best_bid 0.60. Später fällt der
+    # UP-Ask auf 0.60 (Markt kommt zu uns) -> gefüllt zu 0.60. UP gewinnt.
+    rows = [
+        {"kind": "resolution", "slug": "s1", "outcome": "up"},
+        _mk_snap("s1", 30, "up", 0.60, 0.63, 0.37, 0.40),   # Post bei T-30
+        _mk_snap("s1", 20, "up", 0.58, 0.60, 0.40, 0.42),   # Ask 0.60 <= 0.60 -> Fill
+    ]
+    d = aggregate_shadow_maker(rows)["by_offset"][30]
+    assert d["quotes"] == 1 and d["fill_rate"] == 1.0
+    assert d["fill_acc"] == 1.0
+    assert abs(d["avg_entry"] - 0.60) < 1e-9
+    assert abs(d["ev_per_fill"] - 0.40) < 1e-9      # 1 - 0.60
+
+
+def test_shadow_maker_no_fill_when_market_never_crosses():
+    # Ask bleibt über unserem Gebot -> nie gefüllt -> ev_per_quote = 0.
+    rows = [
+        {"kind": "resolution", "slug": "s1", "outcome": "up"},
+        _mk_snap("s1", 30, "up", 0.60, 0.63, 0.37, 0.40),
+        _mk_snap("s1", 10, "up", 0.61, 0.64, 0.36, 0.39),   # Ask 0.64 > 0.60
+    ]
+    d = aggregate_shadow_maker(rows)["by_offset"][30]
+    assert d["fill_rate"] == 0.0
+    assert d["ev_per_quote"] == 0.0
+    assert d["fill_acc"] is None
+
+
+def test_shadow_maker_adverse_selection_loss():
+    # Signal UP, gefüllt zu 0.60 — aber DOWN gewinnt (Adverse Selection:
+    # wir wurden nur gefüllt, weil UP gerade abstürzte). Verlust -0.60.
+    rows = [
+        {"kind": "resolution", "slug": "s1", "outcome": "down"},
+        _mk_snap("s1", 30, "up", 0.60, 0.63, 0.37, 0.40),
+        _mk_snap("s1", 15, "up", 0.50, 0.58, 0.42, 0.50),   # Ask 0.58 <= 0.60 -> Fill
+    ]
+    d = aggregate_shadow_maker(rows)["by_offset"][30]
+    assert d["fill_rate"] == 1.0
+    assert d["fill_acc"] == 0.0
+    assert abs(d["ev_per_fill"] + 0.60) < 1e-9      # 0 - 0.60

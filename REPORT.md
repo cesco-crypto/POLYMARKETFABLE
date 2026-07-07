@@ -579,3 +579,38 @@ final geschlossen wird: (a) **Order-Latenz messen** (schliesst den Taker-Fall
 definitiv), (b) **Maker-Variante** prüfen — Gebote UNTER Fair posten und den
 Spread einnehmen statt am Ask zu zahlen (andere, evtl. bessere Ökonomie, aber
 mit Adverse-Selection-Risiko wie beim Reward-Farming-Track).
+
+## Up/Down MAKER-Variante — Shadow-Replay (07.07.2026): Adverse Selection tötet sie
+
+`aggregate_shadow_maker` (neu): Replay über die aufgezeichneten Orderbuch-
+Zeitreihen (168 Fenster). Modell: statt am Ask zu KAUFEN posten wir ein
+ruhendes Gebot auf der Signal-Seite zum best_bid; gefüllt, wenn der Ask später
+darauf fällt. Ergebnis, sweet spot (nach 0% Maker-Fee, also GÜNSTIGSTER Fall):
+
+| ≤ Sek. | Fill-Rate | **Fill-Treffer** | Ø Entry | EV/Fill | EV/Quote | Taker-EV(7%) |
+|---|---|---|---|---|---|---|
+| 15s | 25.6% | **60.0%** | 0.661 | -0.061 | -0.016 | +0.008 |
+| 20s | 28.6% | **58.7%** | 0.639 | -0.052 | -0.015 | +0.013 |
+| 30s | 34.6% | **60.0%** | 0.641 | -0.041 | -0.014 | +0.016 |
+
+**Lehrbuch-Adverse-Selection, empirisch:** Die unbedingte Signal-Trefferquote
+ist ~80% (Taker) — aber die FILL-bedingte Trefferquote ist nur **~59%**. Warum:
+Unser Gebot auf «up» füllt sich bevorzugt DANN, wenn «up» gerade abstürzt —
+also überproportional auf VERLIERERN. Der billigere Einstieg (0.64 statt 0.79
+Ask) wird von der eingebrochenen Trefferquote mehr als aufgefressen: **EV/Fill
+und EV/Quote sind über ALLE Buckets negativ.** Und das ist die OBERGRENZE
+(Paper-Maker ohne Queue-Position) — real noch schlechter.
+
+**Verdikt: die Maker-Variante ist SCHLECHTER als der (schon toten) Taker.**
+Beide Richtungen des Up/Down-Edges sind damit gemessen und geschlossen.
+followsmartwallet ist mit an Sicherheit grenzender Wahrscheinlichkeit KEIN
+passiver Maker — sie sind Taker mit einem Signal/einer Ausführung, die wir
+nicht haben.
+
+**Tragweite über Up/Down hinaus:** Dieser Adverse-Selection-Mechanismus ist
+GENAU das ungemessene Risiko, das die Strategie-Flotte für den Reward-Maker-
+Farming-Track als DIE Kernfrage benannt hat. Der Unterschied dort: es gibt
+eine ZUSÄTZLICHE Einnahme (die Reward-Zahlungen), die die Adverse-Selection-
+Verluste evtl. überkompensiert. Genau das — und nur das — bleibt als
+kapital-skalierbarer Weg zu messen, mit denselben Werkzeugen (Shadow-Maker +
+Inventar-PnL), bevor Kapital fliesst.

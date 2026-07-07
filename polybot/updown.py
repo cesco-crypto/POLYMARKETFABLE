@@ -816,6 +816,95 @@ def aggregate_updown(rows: list[dict], fee_rate: float = 0.0) -> dict:
     }
 
 
+def aggregate_shadow_maker(rows: list[dict], maker_fee: float = 0.0,
+                           undercut: float = 0.0) -> dict:
+    """Shadow-Maker-Replay über die aufgezeichneten Orderbuch-Zeitreihen.
+
+    Frage: Wenn wir — statt am Ask zu KAUFEN (Taker) — ein ruhendes Gebot auf
+    der vom Signal favorisierten Seite posten und den Spread einnehmen, bleibt
+    nach ADVERSE SELECTION netto etwas übrig? Adverse Selection = unser Gebot
+    wird bevorzugt DANN gefüllt, wenn der Markt gegen uns läuft (der Token
+    fällt auf unser Gebot, weil unsere Seite gerade unwahrscheinlicher wird).
+
+    Modell je Fenster und Offset-Bucket b: zum Zeitpunkt, in dem das Fenster
+    erstmals ≤ b Sekunden vor Schluss ist, posten wir ein Gebot auf dem
+    Signal-Token zum damaligen best_bid (minus `undercut`). GEFÜLLT wird es,
+    wenn der best_ask desselben Tokens später im Fenster auf ≤ Gebotspreis
+    fällt (jemand verkauft in uns hinein). Fill-Preis = Gebotspreis. Auszahlung
+    1, wenn unsere Seite gewinnt, sonst 0.
+
+    WARNUNG (Paper-Maker-Optimismus, CLAUDE.md): ohne Queue-Position nehmen wir
+    an, wir würden gefüllt, sobald der Markt unseren Preis kreuzt — real füllen
+    zuerst die Orders VOR uns in der Schlange. fill_rate und ev sind damit eine
+    OBERGRENZE, kein Realwert. Der entscheidende Befund ist die Richtung:
+    liegt fill_acc DEUTLICH unter der unbedingten Trefferquote (~Adverse
+    Selection) und wird ev_per_quote dadurch negativ?
+
+    Je Bucket: quotes (Fenster mit Gebot), fill_rate, fill_acc (Trefferquote
+    der GEFÜLLTEN), avg_entry, ev_per_fill, ev_per_quote (unerfüllt = 0).
+    """
+    outcomes = {r["slug"]: r["outcome"] for r in rows
+                if r.get("kind") == "resolution" and r.get("outcome")}
+    byslug: dict[str, list[dict]] = {}
+    for r in rows:
+        if r.get("kind") == "snapshot":
+            byslug.setdefault(r["slug"], []).append(r)
+
+    buckets: dict[int, dict] = {}
+    for slug, snaps in byslug.items():
+        truth = outcomes.get(slug)
+        if truth is None:
+            continue
+        snaps.sort(key=lambda x: -x.get("seconds_to_close", 0))  # früh -> spät
+        for b in OFFSET_BUCKETS:
+            # Post-Zeitpunkt: erster Snapshot mit seconds_to_close <= b.
+            post_i = next((i for i, s in enumerate(snaps)
+                           if s.get("seconds_to_close", 1e9) <= b), None)
+            if post_i is None:
+                continue
+            post = snaps[post_i]
+            pred = post.get("pred")
+            if pred not in ("up", "down"):
+                continue
+            bid = post.get("up_bid") if pred == "up" else post.get("down_bid")
+            if bid is None:
+                continue
+            price = round(bid - undercut, 6)
+            # Fill-Scan: späterer best_ask der Signal-Seite <= Gebotspreis?
+            askkey = "up_ask" if pred == "up" else "down_ask"
+            filled = any((s.get(askkey) is not None and s[askkey] <= price)
+                         for s in snaps[post_i + 1:])
+            d = buckets.setdefault(b, {"quotes": 0, "fills": 0, "fill_correct": 0,
+                                       "entry_sum": 0.0, "pnl_sum": 0.0,
+                                       "windows": set()})
+            d["quotes"] += 1
+            d["windows"].add(slug)
+            if filled:
+                correct = (pred == truth)
+                fee = maker_fee * price * (1.0 - price)
+                pnl = (1.0 if correct else 0.0) - price - fee
+                d["fills"] += 1
+                d["fill_correct"] += int(correct)
+                d["entry_sum"] += price
+                d["pnl_sum"] += pnl
+
+    out = {}
+    for b in sorted(buckets):
+        d = buckets[b]
+        q, f = d["quotes"], d["fills"]
+        out[b] = {
+            "quotes": q,
+            "windows": len(d["windows"]),
+            "fill_rate": f / q if q else None,
+            "fill_acc": d["fill_correct"] / f if f else None,
+            "avg_entry": d["entry_sum"] / f if f else None,
+            "ev_per_fill": d["pnl_sum"] / f if f else None,
+            "ev_per_quote": d["pnl_sum"] / q if q else None,
+        }
+    return {"windows_resolved": len(outcomes), "maker_fee": maker_fee,
+            "undercut": undercut, "by_offset": out}
+
+
 def load_rows(path: Path = DATA_PATH) -> list[dict]:
     if not path.exists():
         return []
