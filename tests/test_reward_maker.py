@@ -96,6 +96,42 @@ def test_replay_rewards_can_offset_adverse_selection():
     assert hi > lo                      # hohe Reward-Rate hebt Netto
 
 
+def test_replay_fill_prob_scales_filled_size():
+    hist = [{"t": i * 3600, "p": p} for i, p in
+            enumerate([0.30, 0.40, 0.50, 0.60, 0.70, 0.80])]
+    full = replay_market(hist, 0, 0.045, 1000, 100, fill_prob=1.0)
+    half = replay_market(hist, 0, 0.045, 1000, 100, fill_prob=0.5)
+    # halbe Fill-Wahrscheinlichkeit -> halbe gefüllte Grösse (gleiche Fill-Zahl)
+    assert half["fills_down"] == full["fills_down"]
+    assert abs(half["n_down"] - full["n_down"] / 2) < 1e-9
+
+
+def test_replay_adverse_ticks_worsen_pnl():
+    hist = [{"t": i * 3600, "p": p} for i, p in
+            enumerate([0.30, 0.40, 0.50, 0.60, 0.70, 0.80])]
+    no_pen = replay_market(hist, 0, 0.045, 1000, 100, tick=0.01, adverse_ticks=0)
+    pen = replay_market(hist, 0, 0.045, 1000, 100, tick=0.01, adverse_ticks=1.5)
+    assert pen["trading_pnl"] < no_pen["trading_pnl"]   # Aufschlag verteuert Fills
+
+
+def test_replay_trend_filter_cuts_adverse_fills():
+    # Klarer Aufwärtstrend: der Trend-Filter zieht das DOWN-Gebot zurück ->
+    # weniger toxische Down-Fills, besserer (weniger negativer) Trading-PnL.
+    hist = [{"t": i * 3600, "p": p} for i, p in
+            enumerate([0.30, 0.38, 0.46, 0.54, 0.62, 0.70, 0.78])]
+    off = replay_market(hist, 0, 0.045, 1000, 100, trend_window=0)
+    on = replay_market(hist, 0, 0.045, 1000, 100, trend_window=2, trend_thresh=0.03)
+    assert on["fills_down"] < off["fills_down"]
+    assert on["trading_pnl"] > off["trading_pnl"]
+
+
+def test_replay_depth_multiplier_cuts_rewards():
+    hist = [{"t": i * 86400, "p": 0.50} for i in range(3)]   # flach, nur Rewards
+    lo_mult = replay_market(hist, 100, 0.045, 1000, 100, depth_multiplier=1.0)
+    hi_mult = replay_market(hist, 100, 0.045, 1000, 100, depth_multiplier=3.0)
+    assert hi_mult["rewards"] < lo_mult["rewards"]      # mehr Konkurrenz -> weniger Reward
+
+
 def _wl(tmp_path):
     wl = {"markets": [{"label": "T", "slug": "m1", "up_token": "U",
                        "down_token": "D", "daily_rate": 100, "min_size": 100,

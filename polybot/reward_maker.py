@@ -74,12 +74,15 @@ def backtest_watchlist(watchlist_path: Path = WATCHLIST_PATH,
         if len(hist) < 2:
             continue
         # Konkurrenz-Tiefe aus dem AKTUELLEN Buch (historische unbekannt).
+        # Boden 500 USDC: ein gerade dünnes Buch soll die Rewards nicht
+        # explodieren lassen (konservativ; der Multiplier kommt in replay dazu).
         bk = books.get_book(m["up_token"])
         mid = bk.midpoint if bk and bk.midpoint else hist[-1]["p"]
-        comp = qualifying_depth(bk, mid, float(m["max_spread"]))
+        comp = max(qualifying_depth(bk, mid, float(m["max_spread"])), 500.0)
         size = quote_size if quote_size is not None else float(m["min_size"])
         res = replay_market(hist, float(m["daily_rate"]),
-                            float(m["max_spread"]) / 100.0, comp, size, half_frac)
+                            float(m["max_spread"]) / 100.0, comp, size, half_frac,
+                            tick=float(m.get("min_tick", 0.01)))
         res["label"] = m.get("label", m["slug"])
         res["competing_notional"] = comp
         res["capital"] = size * mid + size * (1 - mid)
@@ -143,17 +146,27 @@ def reward_accrual(daily_rate: float, our_notional: float,
 
 def replay_market(history: list[dict], daily_rate: float, band: float,
                   competing_notional: float, quote_size: float,
-                  half_frac: float = 0.8) -> dict:
+                  half_frac: float = 0.8, tick: float = 0.01,
+                  fill_prob: float = 0.75, adverse_ticks: float = 1.0,
+                  depth_multiplier: float = 3.0,
+                  trend_window: int = 0, trend_thresh: float = 0.03) -> dict:
     """Backtest des Reward-MM über eine Mid-Preis-Historie (Speed statt Warten).
 
     Modell (realistisch, nur Käufe — keine nackten Shorts): je Bar posten wir
     ein Gebot auf UP zum up_mid−h UND auf DOWN zum (1−up_mid)−h (h=half_frac·
     band). Bewegt sich der Mid zur nächsten Bar unter eines der Gebote, wird es
-    gefüllt (wir kaufen den Token zu unserem Limit). Gematchte UP+DOWN-Paare
-    lösen zu 1 USDC auf (Spread-Gewinn); der Überhang trägt Richtungsrisiko —
-    das ist die ADVERSE SELECTION (auf einem Trend kaufen wir wiederholt die
-    fallende Seite). Rewards pro-rata über die Zeit (Konkurrenz-Tiefe konstant
-    aus dem aktuellen Buch — historische Tiefe unbekannt, ehrlicher Vorbehalt).
+    gefüllt. Gematchte UP+DOWN-Paare lösen zu 1 USDC auf (Spread-Gewinn); der
+    Überhang trägt Richtungsrisiko — die ADVERSE SELECTION.
+
+    KONSERVATIVE Annahmen (statt „jeder Mid-Cross füllt voll & zum Limit"):
+    - `fill_prob` (Default 0.75): nur dieser Anteil unserer Grösse füllt bei
+      einem Cross — wir stehen hinter anderen in der Queue (partielle Fills).
+    - `adverse_ticks` (Default 1.0): der effektive Kaufpreis ist um so viele
+      Ticks SCHLECHTER als unser Limit — die Fills, die wir bekommen, sind die
+      toxischen (Markt gappt durch uns). Reiner Aufschlag, macht konservativ.
+    - `depth_multiplier` (Default 3.0): die beobachtete Konkurrenz-Tiefe wird
+      hochskaliert (aktuelles Buch unterschätzt die reale konkurrierende
+      Maker-Liquidität) → unser pro-rata Reward-Anteil sinkt.
 
     history: [{t, p}] mit p = up_mid, zeitlich sortiert. Rückgabe: Kennzahlen
     inkl. net = Endwert(Inventar zum letzten Mid) + Rewards − Kosten.
@@ -163,22 +176,34 @@ def replay_market(history: list[dict], daily_rate: float, band: float,
     cost = 0.0
     rewards = 0.0
     fu = fd = 0
+    comp_eff = competing_notional * depth_multiplier
+    penalty = adverse_ticks * tick
+    fsize = quote_size * fill_prob            # nur Teilfüllung (Queue)
     for i in range(len(history) - 1):
         up_mid = history[i]["p"]
         nxt = history[i + 1]["p"]
         dt = history[i + 1]["t"] - history[i]["t"]
         bid_up = up_mid - h
         bid_down = (1 - up_mid) - h
-        if nxt <= bid_up and bid_up > 0:
-            n_up += quote_size
-            cost += quote_size * bid_up
+        # TREND-FILTER: bei starkem Momentum das Gebot auf der FALLENDEN Seite
+        # zurückziehen (wir fangen sonst das fallende Messer). mom>0 = up steigt
+        # -> down fällt -> down-Gebot pausieren; mom<0 umgekehrt.
+        mom = 0.0
+        if trend_window > 0 and i >= trend_window:
+            mom = up_mid - history[i - trend_window]["p"]
+        quote_up = not (trend_window > 0 and mom < -trend_thresh)
+        quote_down = not (trend_window > 0 and mom > trend_thresh)
+        if quote_up and nxt <= bid_up and bid_up > 0:
+            n_up += fsize
+            cost += fsize * (bid_up + penalty)     # schlechterer Effektivpreis
             fu += 1
-        elif nxt >= up_mid + h and bid_down > 0:   # down-Seite fällt -> down-Gebot füllt
-            n_down += quote_size
-            cost += quote_size * bid_down
+        elif quote_down and nxt >= up_mid + h and bid_down > 0:
+            n_down += fsize
+            cost += fsize * (bid_down + penalty)
             fd += 1
-        our_notional = quote_size            # = qs·up_mid + qs·(1−up_mid)
-        rewards += reward_accrual(daily_rate, our_notional, competing_notional, dt)
+        # Reward: unsere VOLLE ruhende Grösse qualifiziert (Fill-Anteil ändert
+        # das nicht), aber gegen die hochskalierte Konkurrenz-Tiefe.
+        rewards += reward_accrual(daily_rate, quote_size, comp_eff, dt)
     final = history[-1]["p"] if history else 0.5
     inv_value = n_up * final + n_down * (1 - final)
     trading_pnl = inv_value - cost           # realisiert (Paare) + unrealisiert

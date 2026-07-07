@@ -701,3 +701,41 @@ symmetrische Maker verliert genau dann, wenn der Markt läuft — d.h. das
 Modell/der Skew muss Trends MEIDEN oder gegen das Momentum quoten. Die Baseline
 ist gemessen; der Wert eines Trend-Filters/Skews ist jetzt schnell backtestbar
 (Minuten pro Iteration statt Tage).
+
+## Konservativer Backtest + Trend-Filter (07.07.2026) — Reward-MM zu dünn
+
+Auf Nutzer-Wunsch die optimistischen Annahmen konservativ ersetzt:
+- **Fill-Wahrscheinlichkeit** (Default 0.75): nur dieser Anteil füllt je Cross
+  (Queue-Position/Partial-Fills).
+- **Adverse-Tick-Aufschlag** (Default 1.0 Tick): effektiver Kaufpreis um so
+  viele Ticks schlechter als das Limit (die Fills sind toxisch).
+- **Konkurrenz-Tiefe** konservativer: `max(Buch-Tiefe, 500) × 3` → kleinerer
+  pro-rata Reward-Anteil.
+
+Neue 14-Tage-Baseline (skew=0): GESAMT **−582** (vorher optimistisch −476).
+Rewards fielen +346 → **+83** (Tiefen-Multiplier dominiert), Trading-PnL −823 →
+−671. Sogar GPT-5.6 kippte von +37 auf −87.
+
+Trend-Filter (Momentum-Gebot der fallenden Seite zurückziehen) gesweept:
+
+| Einstellung | Netto/14d | Rewards | Trading-PnL |
+|---|---|---|---|
+| skew AUS | −587 | +83 | −671 |
+| tw=6 th=0.02 | −389 | +83 | −473 |
+| tw=24 th=0.05 | **−350** | +83 | −433 |
+
+**Verdikt:** Der Trend-Filter halbiert den Verlust, dreht das Vorzeichen aber
+NICHT. Der KILLER ist strukturell: die **Reward-Obergrenze** (bei null Adverse
+Selection) ist nur **+83/14d ≈ +6/Tag** über die ganze Watchlist bei min_size.
+Selbst ein perfektes Modell deckelt dort. Und weil Rewards UND Adverse
+Selection ~linear mit der Grösse skalieren, ändert Hochskalieren das Vorzeichen
+nicht — ein negativer Per-Kapital-Edge bleibt negativ. → Symmetrisches
+Reward-MM (auch mit Trend-Vermeidung) ist auf dieser Watchlist netto negativ
+und die Reward-Dichte pro Kapital zu klein für 1000/Tag.
+
+**Einzige noch UNMODELLIERTE Aufwärtschance:** unser Modell kauft nur (Bids)
+und hält — es postet KEINE Exit-Asks, um Inventar bei Erholung mit Gewinn
+abzustossen (Round-Trip-Spread). Ein vollwertiger zweiseitiger MM mit Exit-
+Quotes könnte den Überhang (die Hauptverlustquelle) senken. Das ist der eine
+Baustein, der die Ökonomie noch materiell ändern könnte — der nächste
+ehrliche Test, bevor Reward-MM final geschlossen wird.
