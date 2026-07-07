@@ -40,8 +40,14 @@ maker/funder = Smart-Contract-Wallet, signiert mit dem EOA-Key.
 - Delayed Orders (In-play-Matching-Delay): 15s-Poll-Fenster
   (`DELAY_POLL_*`) — ein Cancel verliert sonst das Race gegen das
   Matching (Lehre vom ersten Live-Trade 05.07.).
-- `_quantize_fok_groups`: CLOB-Market-Order-Präzision (BUY 2, SELL 4
-  Nachkommastellen auf Size×Preis) bei GLEICHER Stückzahl aller Beine.
+- `_quantize_fok_groups` / `_marketable_size`: CLOB-Betrags-Präzision auf
+  Size×Preis bei GLEICHER Stückzahl aller Beine. Die erlaubten Dezimalen
+  hängen am Tick (`_amount_precision`, gespiegelt aus
+  `py_clob_client_v2.ROUNDING_CONFIG`: Tick 0.01 → 4, 0.1 → 3, 0.001 → 5,
+  usw.), NICHT hart 2/4 (Befund 07.07.: die alte 2-Dezimal-Annahme verwarf
+  gültige preis-schiefe Arbs wie NO@0.897/Größe 6). Auf dem 0.01-Raster ist
+  Size×Preis stets ≤ 4 Dezimalen → dort wird nie getrimmt; der Trimm bleibt
+  nur defensiver Fallback (streng 2 Dez.) für unbekannte Ticks.
 - Reject-Cooldown je Token (`order_reject_cooldown_s`); fatale
   Konfig-Rejects («maker address not allowed») sperren bis Prozessende.
 - GTC-Reste werden über `_reconcile_pending` zu Tick-Beginn nachgebucht.

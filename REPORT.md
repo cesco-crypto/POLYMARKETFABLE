@@ -939,3 +939,49 @@ Edge (bewiesen, p≈0) — aber seine KAPAZITÄT ist begrenzt. Bei realistischem
 Kapital ein solides Nebeneinkommen (zweistellig bis ~200/Tag); 1000/Tag bleibt
 kapitalseitig ausserhalb der validierten Zone. Ehrlich: ein guter kleiner
 Motor, kein 1000/Tag-Motor.
+
+---
+
+## P6 — Amount-Präzision war zu streng modelliert (07.07.2026)
+
+**Befund aus dem ersten Live-Log nach dem Survivability-/P5-Deploy:** Viele
+Zeilen `Gruppe … keine börsenkonforme gemeinsame Size — Gelegenheit
+übersprungen`, u.a. auf SPY Up/Down (YES@0.08 + NO@0.897, Größe 6). Kein
+Verlust — aber **verlorene Fill-Versuche**: der Bot kam gar nicht erst dazu,
+die Order zu posten.
+
+**Ursache (Modellfehler, kein Marktproblem):** Der Vorab-Filter
+(`_marketable_size` / `_quantize_fok_groups`) nahm an, der USDC-Betrag
+(Size × Preis) dürfe bei BUY nur **2 Nachkommastellen** haben (`mod =
+1_000_000`). Die echte Präzision hängt aber am Tick — gespiegelt aus
+`py_clob_client_v2.ROUNDING_CONFIG`:
+
+| Tick | erlaubte Betrags-Dezimalen |
+|---|---|
+| 0.1 | 3 |
+| 0.01 | 4 |
+| 0.005 / 0.001 | 5 |
+| 0.0025 / 0.0001 | 6 |
+
+Für NO@0.897 (Tick 0.001, 5 Dezimalen erlaubt) ist 6 × 0.897 = 5.382 längst
+konform — das 2-Dezimal-Modell verlangte aber eine Größe als Vielfaches von
+10 Shares und verwarf die Gruppe. **Rechnerisch belegt:** altes Modell
+`max k≤600 = 0`, korrektes Modell `= 600` (volle Größe 6).
+
+**Wichtige Nebenerkenntnis:** Bei Tick 0.01 (die Mehrheit der Märkte) ist
+Size × Preis mit 2-Dezimal-Size und 2-Dezimal-Preis **immer** ≤ 4 Dezimalen —
+d.h. auf dem 0.01-Raster wird **nie** getrimmt oder verworfen. Der ganze
+Trimm-Apparat war reine Kompensation der falschen Annahme; er bleibt nur noch
+als defensiver Fallback (strenge 2 Dezimalen) für unbekannte Ticks.
+
+**Fix:** `_amount_precision(tick)` (spiegelt ROUNDING_CONFIG), `mod = 10^(8 −
+amount_dezimalen)` in beiden Pfaden; Tick pro Bein statt hardcodiert. Tests:
+`test_amount_precision_spiegelt_rounding_config`,
+`test_marketable_size_haelt_tickabhaengige_praezision_ein`,
+`test_fok_gruppe_skewed_preise_wird_nicht_faelschlich_verworfen` (SPY-
+Regression), untrimmt-Fall + Fallback-Drop. 512 Tests grün.
+
+**Ehrliche Einordnung (Wie könnte das lügen?):** Das schaltet nur **mehr
+Fill-VERSUCHE** frei, keinen Gewinn. Ob die Versuche live tatsächlich beide
+Beine füllen (oder FOK weiter alles killt), bleibt die offene Go/No-Go-Frage
+— zu klären am nächsten 24h-Log über echte Doppel-Fills.

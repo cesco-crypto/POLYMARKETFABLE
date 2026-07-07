@@ -1039,20 +1039,42 @@ def test_paperbroker_fallback_fee_rate_aus_config():
 
 # ---- Market-Order-Präzision (CLOB: "invalid amounts", 05.07.2026 live) ----------
 
-def test_marketable_size_haelt_clob_praezision_ein():
+def test_amount_precision_spiegelt_rounding_config():
+    from polybot.execution import _amount_precision
+    # Gespiegelt aus py_clob_client_v2 ROUNDING_CONFIG.amount.
+    assert _amount_precision(0.1) == 3
+    assert _amount_precision(0.01) == 4
+    assert _amount_precision(0.005) == 5
+    assert _amount_precision(0.0025) == 6
+    assert _amount_precision(0.001) == 5
+    assert _amount_precision(0.0001) == 6
+    # Unbekannter Tick -> strenger Fallback (2 Dezimalen).
+    assert _amount_precision(0.02) == 2
+
+
+def test_marketable_size_haelt_tickabhaengige_praezision_ein():
     from polybot.execution import _marketable_size
-    # BUY: Size*Preis darf max. 2 Nachkommastellen haben.
-    assert _marketable_size(21.0, 0.43, "BUY") == pytest.approx(21.0)   # 9.03 ok
-    assert _marketable_size(21.0, 0.435, "BUY") == pytest.approx(20.0)  # 9.135 -> 8.70
-    assert _marketable_size(5.55, 0.31, "BUY") == pytest.approx(5.0)    # 1.7205 -> 1.55
-    # SELL: Size*Preis darf max. 4 Nachkommastellen haben (lockerer).
+    # Tick 0.01 -> Betrag darf 4 Nachkommastellen haben. Size (2 Dez) * Preis
+    # (2 Dez) hat max. 4 Dezimalen -> auf dem 0.01-Raster passt ALLES, es wird
+    # nichts getrimmt. (Der alte Code kappte hier fälschlich auf 2 Dezimalen.)
+    assert _marketable_size(21.0, 0.43, "BUY") == pytest.approx(21.0)   # 9.03
+    assert _marketable_size(21.0, 0.435, "BUY") == pytest.approx(21.0)  # 9.135 (3 Dez, ok)
+    assert _marketable_size(5.55, 0.31, "BUY") == pytest.approx(5.55)   # 1.7205 (4 Dez, ok)
+    assert _marketable_size(1.0, 0.435, "BUY") == pytest.approx(1.0)    # 0.435 (3 Dez, ok)
     assert _marketable_size(21.0, 0.435, "SELL") == pytest.approx(21.0)
-    # Keine gültige Size unterhalb -> 0 (Order wird verworfen statt abgelehnt).
-    assert _marketable_size(1.0, 0.435, "BUY") == pytest.approx(0.0)
+    # Feiner Tick 0.001 -> 5 Dezimalen erlaubt: der zuvor verworfene SPY-Fall
+    # (NO@0.897, Größe 6) ist jetzt konform (5.382 hat 3 Dez).
+    assert _marketable_size(6.0, 0.897, "BUY", 0.001) == pytest.approx(6.0)
+    # Unbekannter Tick -> Fallback 2 Dezimalen (streng): 1.7205 wird gekappt.
+    assert _marketable_size(5.55, 0.31, "BUY", 0.02) == pytest.approx(5.0)
+    assert _marketable_size(1.0, 0.435, "BUY", 0.02) == pytest.approx(0.0)
+    # Null/ungültig -> 0.
     assert _marketable_size(0.0, 0.43, "BUY") == pytest.approx(0.0)
 
 
-def test_fok_gruppe_wird_auf_gemeinsame_konforme_size_quantisiert():
+def test_fok_gruppe_tick001_bleibt_untrimmt():
+    # Tick 0.01: Size auf dem 0.01-Raster ist IMMER betragskonform (4 Dez),
+    # es wird nichts gekappt — die volle Größe 10.5 geht an beide Beine.
     client = FakeClobClient()
     broker = make_live_broker(client)
     pf = Portfolio(cash=1000.0)
@@ -1065,18 +1087,50 @@ def test_fok_gruppe_wird_auf_gemeinsame_konforme_size_quantisiert():
     books = {t: OrderBook(token_id=t, bids=[], asks=[Level(0.99, 100)])
              for t in ("yes", "no")}
     assert broker.execute(legs, books, pf) == 2
-    # 10.5*0.43=4.5150 (4 NK) wäre abgelehnt worden -> beide Beine auf 10.0.
-    assert client.created_sizes == [pytest.approx(10.0), pytest.approx(10.0)]
+    assert client.created_sizes == [pytest.approx(10.5), pytest.approx(10.5)]
+
+
+class _Tick001Client(FakeClobClient):
+    """Feiner Markt: Tick 0.001, 3-Dezimalen-Preise (z.B. SPY Up/Down)."""
+
+    def get_tick_size(self, token_id: str) -> str:
+        return "0.001"
+
+
+def test_fok_gruppe_skewed_preise_wird_nicht_faelschlich_verworfen():
+    # Regression 07.07.: NO@0.897 + YES@0.101 (Größe 6, Tick 0.001) wurde vom
+    # alten 2-Dezimal-Modell als "keine börsenkonforme Size" verworfen. Bei
+    # Tick 0.001 sind 5 Dezimalen erlaubt -> beide Beine sind konform und
+    # werden in voller Größe gefeuert (echter Fill-Versuch statt Skip).
+    client = _Tick001Client()
+    broker = make_live_broker(client)
+    pf = Portfolio(cash=1000.0)
+    legs = [
+        Signal(token_id="yes", side="BUY", price=0.101, size=6.0,
+               reason="arb", group="g1"),
+        Signal(token_id="no", side="BUY", price=0.897, size=6.0,
+               reason="arb", group="g1"),
+    ]
+    books = {t: OrderBook(token_id=t, bids=[], asks=[Level(0.99, 100)])
+             for t in ("yes", "no")}
+    assert broker.execute(legs, books, pf) == 2
+    assert client.created_sizes == [pytest.approx(6.0), pytest.approx(6.0)]
 
 
 def test_fok_gruppe_ohne_konforme_size_wird_verworfen():
-    client = FakeClobClient()
+    # Bein unter der kleinsten betragskonformen Size wird verworfen (nichts
+    # gesendet) statt vom Server abgelehnt. Erzwungen über einen unbekannten
+    # Tick (Fallback: strenge 2 Dezimalen) und ein zu kleines Bein.
+    class _UnknownTickClient(FakeClobClient):
+        def get_tick_size(self, token_id: str) -> str:
+            return "0.02"  # nicht in ROUNDING_CONFIG -> Fallback-Präzision 2
+
+    client = _UnknownTickClient()
     broker = make_live_broker(client)
     pf = Portfolio(cash=1000.0)
-    # Preis 0.435 gibt es bei Tick 0.01 nicht — der Fake-Client liefert Tick
-    # 0.01, also quantisiert der Vorlauf auf 0.43: dafür ist 0.5 zu klein
-    # (kleinste konforme Size ist 1.0 bei p=0.43).
-    legs = [Signal(token_id="yes", side="BUY", price=0.43, size=0.5,
+    # Tick 0.02 quantisiert 0.43 -> 0.42; bei 2-Dez-Präzision ist die kleinste
+    # konforme Size 0.5 (k=50). Größe 0.3 (k=30) liegt darunter -> verworfen.
+    legs = [Signal(token_id="yes", side="BUY", price=0.43, size=0.3,
                    reason="arb", group="g1")]
     books = {"yes": OrderBook(token_id="yes", bids=[], asks=[Level(0.99, 100)])}
     assert broker.execute(legs, books, pf) == 0
