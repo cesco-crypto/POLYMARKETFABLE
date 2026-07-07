@@ -235,6 +235,50 @@ def replay_market(history: list[dict], daily_rate: float, band: float,
     }
 
 
+def realized_vol(history: list[dict]) -> float:
+    """Realisierte Volatilität = Standardabweichung der Mid-Differenzen.
+
+    Das ex-ante Selektionssignal: Volatilität clustert (persistiert über die
+    Zeit), also sagt die Vol in Hälfte 1 die Vol in Hälfte 2 grob voraus —
+    und ruhige Märkte tragen den Reward-MM-Edge (wenig Trend-Adverse-Selection).
+    """
+    if len(history) < 3:
+        return 0.0
+    import statistics as _st
+    diffs = [history[i + 1]["p"] - history[i]["p"] for i in range(len(history) - 1)]
+    return _st.pstdev(diffs)
+
+
+def volatility_edge(entries: list[dict], threshold: float = 0.002) -> dict:
+    """Out-of-Sample-Test der Low-Vol-Edge-Hypothese.
+
+    Je Markt: realisierte Vol auf Hälfte 1 (in-sample) messen. Ist sie unter
+    `threshold`, kommt der Markt in SELECTED. Dann Reward-MM auf Hälfte 2
+    (out-of-sample) fahren. Der Vergleich SELECTED vs REST zeigt, ob die
+    ex-ante Vol-Regel out-of-sample einen positiven Netto-Edge trennt.
+
+    entries: je Markt {daily_rate, band, comp, size, tick, history, label}.
+    """
+    sel_nets, rest_nets, sel_pos = [], [], 0
+    for e in entries:
+        IS, OOS = split_history(e["history"])
+        if len(IS) < 3 or len(OOS) < 2:
+            continue
+        n = replay_market(OOS, e["daily_rate"], e["band"], e["comp"], e["size"],
+                          tick=e.get("tick", 0.01))["net"]
+        if realized_vol(IS) < threshold:
+            sel_nets.append(n)
+            sel_pos += int(n > 0)
+        else:
+            rest_nets.append(n)
+    return {
+        "threshold": threshold,
+        "selected_n": len(sel_nets), "selected_oos_sum": sum(sel_nets),
+        "selected_positive": sel_pos,
+        "rest_n": len(rest_nets), "rest_oos_sum": sum(rest_nets),
+    }
+
+
 def split_history(history: list[dict]) -> tuple[list[dict], list[dict]]:
     """Historie zeitlich hälften: (in-sample, out-of-sample)."""
     if len(history) < 4:

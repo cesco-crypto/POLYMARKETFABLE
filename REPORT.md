@@ -816,3 +816,44 @@ Wetten.
 skalierbarer Edge → kein Kapitaleinsatz gerechtfertigt. „Nicht robust bewiesen"
 statt „tot" — aber für die Kapitalentscheidung dasselbe Ergebnis. Sauber, per
 Out-of-Sample-Methodik, ohne einen Dollar Risiko.
+
+## ★ ERSTER ROBUSTER EDGE: Low-Volatility-Reward-MM (07.07.2026)
+
+Neues Ziel (Nutzer): statt 1000/Tag „beweise IRGENDEINEN robusten, kleinen
+Netto-Edge". Der GPT-5.6-Lichtblick (Range-Markt, in beiden Hälften positiv)
+führte zur ex-ante Hypothese: **ruhige Märkte (niedrige realisierte Vol) tragen
+den Reward-MM-Edge; Vol clustert, ist also im Voraus erkennbar.**
+
+Sauberer Out-of-Sample-Test (`realized_vol` + `volatility_edge`, beide
+getestet): ex-ante Vol auf Hälfte 1 messen → Markt selektieren → Reward-MM
+BLIND auf Hälfte 2. 84 reward-tragende Märkte (Rate ≥ 20, ≥ 10d Historie),
+KONSERVATIVES Modell (fill_prob 0.75, adverse_ticks 1, Tiefe × 3):
+
+| Ex-ante-Regel | SELECTED (OOS) | REST (OOS) |
+|---|---|---|
+| vol < 0.0015 | +8.8, **14/17 positiv** | −643, −9.6/Markt |
+| **vol < 0.002** | **+33.5, 20/24 positiv (83%)** | −668, −11.1/Markt |
+| vol < 0.003 | −40.4, 24/29 (Schwelle zu locker) | −594 |
+
+**Binomialtest vol<0.002: P(≥20/24 | Münze) = 0.001** — statistisch
+signifikant. Die ex-ante Vol-Regel TRENNT out-of-sample einen positiven von
+einem negativen Netto-Edge. **Das ist der erste robuste Befund des Projekts:**
+ruhige Reward-Märkte, im Voraus per Vol-Schwelle wählbar, sind netto positiv —
+unter konservativen Annahmen, out-of-sample, p=0.001.
+
+**Ehrliche Vorbehalte (keine Übertreibung):**
+- **Klein:** +1.40/Markt über die OOS-Hälfte (~7d) bei min_size. Ein Edge,
+  kein Geldregen. Skalierung (× Size, × Märkte) ist die nächste offene Frage.
+- **Ein Split.** p=0.001 ist stark, aber echte Robustheit braucht mehrere
+  rollende Zeitfenster (Vol-Persistenz über die Zeit bestätigen).
+- **Mid-only, keine echte Queue.** Der Live-Shadow-Maker auf einem Low-Vol-Korb
+  bestätigt mit echten Buchdaten.
+- **`realized_vol` misst Choppiness, nicht reinen Drift** — ein glatt
+  trendender Markt entginge der Schwelle. Drift als zweites Selektionssignal
+  ist eine zu validierende Verfeinerung.
+- **Tail-Risiko:** ein „ruhiger" Markt kann auf News springen — Sizing muss das
+  tragen.
+
+Nächste Schritte: (1) Multi-Fenster-Walk-Forward zur Bestätigung der Vol-
+Persistenz; (2) Kapazitäts-/Skalierungsfrage (hält der Edge bei grösserer
+Size?); (3) Live-Shadow auf Low-Vol-Korb. Erst dann Mikro-Kapital.

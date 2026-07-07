@@ -7,7 +7,8 @@ import json
 from polybot.data.orderbook import Level, OrderBook
 from polybot.reward_maker import (MakerState, RewardMakerShadow, detect_fills,
                                   quote_prices, replay_market, reward_accrual,
-                                  round_tick, split_history, walk_forward)
+                                  realized_vol, round_tick, split_history,
+                                  volatility_edge, walk_forward)
 
 
 def test_quote_prices_within_band_and_tick():
@@ -145,6 +146,28 @@ def test_replay_depth_multiplier_cuts_rewards():
     lo_mult = replay_market(hist, 100, 0.045, 1000, 100, depth_multiplier=1.0)
     hi_mult = replay_market(hist, 100, 0.045, 1000, 100, depth_multiplier=3.0)
     assert hi_mult["rewards"] < lo_mult["rewards"]      # mehr Konkurrenz -> weniger Reward
+
+
+def test_realized_vol_distinguishes_calm_and_wild():
+    calm = [{"t": i, "p": 0.50 + (0.001 if i % 2 else -0.001)} for i in range(20)]
+    wild = [{"t": i, "p": 0.50 + (0.05 if i % 2 else -0.05)} for i in range(20)]
+    assert realized_vol(calm) < realized_vol(wild)
+
+
+def test_volatility_edge_selects_by_is_vol_and_reports():
+    # Ein ruhiger (flacher) und ein wilder (Trend) Markt; die Regel muss den
+    # ruhigen in SELECTED, den wilden in REST einsortieren.
+    calm_hist = [{"t": i * 3600, "p": 0.50} for i in range(12)]
+    # echt choppy (hohe Diff-Streuung), nicht nur ein linearer Trend
+    wild_hist = [{"t": i * 3600, "p": 0.30 if i % 2 else 0.62} for i in range(12)]
+    entries = [
+        {"label": "calm", "daily_rate": 100, "band": 0.045, "comp": 1000,
+         "size": 100, "tick": 0.01, "history": calm_hist},
+        {"label": "wild", "daily_rate": 100, "band": 0.045, "comp": 1000,
+         "size": 100, "tick": 0.01, "history": wild_hist},
+    ]
+    res = volatility_edge(entries, threshold=0.005)
+    assert res["selected_n"] == 1 and res["rest_n"] == 1
 
 
 def test_split_history_halves_by_time():
