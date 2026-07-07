@@ -141,6 +141,20 @@ def test_replay_exit_quotes_execute_sells():
     assert (mm["n_up"], mm["n_down"]) != (hold["n_up"], hold["n_down"])
 
 
+def test_replay_tail_control_caps_trend_loss():
+    # Ruhig, dann Ausbruch (Trend). Tail-Control (stop_vol + flatten) muss den
+    # Verlust gegenueber ohne Kontrolle begrenzen.
+    calm = [0.50, 0.49, 0.50, 0.51, 0.50, 0.49, 0.50]
+    breakout = [0.50, 0.44, 0.38, 0.32, 0.26, 0.20, 0.14]   # crash
+    prices = calm + breakout
+    hist = [{"t": i * 3600, "p": p} for i, p in enumerate(prices)]
+    no_rm = replay_market(hist, 0, 0.045, 1000, 100)
+    rm = replay_market(hist, 0, 0.045, 1000, 100,
+                       stop_window=3, stop_vol=0.02, flatten=True)
+    assert rm["flat_events"] >= 1                    # Tail-Control hat gefeuert
+    assert rm["trading_pnl"] > no_rm["trading_pnl"]  # Verlust begrenzt
+
+
 def test_replay_depth_multiplier_cuts_rewards():
     hist = [{"t": i * 86400, "p": 0.50} for i in range(3)]   # flach, nur Rewards
     lo_mult = replay_market(hist, 100, 0.045, 1000, 100, depth_multiplier=1.0)
