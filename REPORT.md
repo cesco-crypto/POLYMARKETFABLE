@@ -1020,3 +1020,36 @@ LIVE-Capture-Quote.
 **Konsequenz:** Der Edge ist so hart abgesichert, wie es ohne Live-Messung
 geht (Code sauber + unvoreingenommen + zeitstabil). Nächster Schritt:
 Live-Pivot des Bots auf Reward-Maker mit Mikro-Limits und Capture messen.
+
+---
+
+## Chainlink-for-Agents geprüft (3-Agenten-Verifikation, 11.07.2026) — nicht integrieren
+
+Anlass: Chainlink-E-Mail (Early Access „Chainlink for Agents", pay-per-call
+Data-Streams-Zugriff via x402/USDC auf Base). Drei parallele Agenten (RTDS-
+Verifikation, Deep-Read mit Live-API-Proben, adversarialer Steelman).
+
+**Urteil: NICHT integrieren.** REST-only, ~1-2 s pro bezahltem Call, 10 calls/s
+GLOBAL, Preview-Status („pricing may change") — als Trading-Feed disqualifiziert;
+für Reward-Farming irrelevant (braucht keine Preisfeeds).
+
+**Zwei Korrekturen an meiner ursprünglichen Einschätzung (ehrlich):**
+1. Der gesponserte Chainlink-Key für 15-Min-Trader läuft NICHT über RTDS,
+   sondern gibt DIREKTEN Zugang zur Data-Streams-API (= die echte Settlement-
+   Pipeline). Das RTDS-Topic crypto_prices_chainlink ist dagegen frei und
+   OHNE Key nutzbar — aber offiziell ist NIRGENDS belegt, dass der RTDS-Push
+   identisch mit dem Settlement-Input ist (Anzeige-Feed derselben Familie).
+2. SPY-/Aktien-Märkte settlen via PYTH, nicht Chainlink (Cointelegraph +
+   RTDS-Doku) — Chainlink-Zugänge sind für diese Märkte komplett irrelevant.
+
+**Der eine echte (kleine) Wert von C4A:** permissionless historische SIGNIERTE
+Reports zu beliebigen Unix-Timestamps, Bulk bis 100 Feeds für 0.005 USDC —
+Settlement-Ground-Truth ohne Sales-Vertrag. Für uns dominiert von Polymarkets
+GRATIS gesponsertem Data-Streams-Key (pm-ds-request.streams.chain.link).
+Merken als Fallback, falls der gesponserte Key je entzogen wird.
+
+**Falls Up/Down-Messung je wieder aufgemacht wird, Quellen-Reihenfolge:**
+① gesponserter Data-Streams-Key (gratis, echte Settlement-Pipeline)
+② RTDS crypto_prices_chainlink (gratis, Push, aber Settlement-Nähe unbelegt —
+   erst empirisch gegen ① verifizieren!)
+③ C4A Einzel-Calls (bezahlter Fallback, signierte Reports).
