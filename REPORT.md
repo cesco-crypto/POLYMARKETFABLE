@@ -982,3 +982,41 @@ strukturell nicht platzierbar, nicht ein Filter-Bug.
 **Lehre:** Eine Annahme aus dem Client-Code lesen ≠ die Server-Regel kennen.
 Der billigste Test wäre gewesen, EINE schiefe Order testweise zu posten und
 die 400-Antwort zu lesen, bevor der Filter angefasst wird.
+
+---
+
+## ★★★ Low-Vol-Edge DREIFACH abgesichert: Full-Universe + Out-of-Time (09.07.2026)
+
+Auslöser: Look-ahead-Bias-Warnung (Artikel des Users). Code-Audit von
+reward_maker.py: SAUBER (Wall bei mid_t, Entscheidung auf Bar i, Fill-Check
+via Bar i+1 zum Limitpreis, keine centered windows, keine geleakten Labels —
+Inventar zum letzten Mid markiert, nicht zum Outcome). Blieben zwei
+META-Look-aheads, beide jetzt getestet (polybot/universe_audit.py):
+
+**Test 1 — Full-Universe (killt Survivorship + Threshold-Fitting):**
+Dieselbe Wall-saubere volatility_edge über 300 UNVOREINGENOMMENE Märkte
+(API-Reihenfolge, aus 8'267 reward-tragenden) statt der 12 handverlesenen,
+Threshold-Sweep 0.001-0.004 statt Punktwert 0.002. Ergebnis: Low-Vol trennt
+OOS über ALLE Schwellen, 90-98% positiv, sign_p≈0.0000 (exakter Binomialtest).
+
+**Test 2 — Out-of-Time (killt Regime-Glück):** Fenster [-28d, -14d] statt
+[-14d, jetzt], 300 Märkte, gleiche 5-Min-Granularität. Ergebnis: 97-99%
+positiv, Trennung +18 bis +22 über alle Schwellen, sign_p≈0.0000.
+
+**Nebenbefund mit Zähnen (Look-ahead-Schutz):** Die CLOB prices-history-API
+IGNORIERT endTs teils und liefert Bars bis JETZT. Ein Out-of-Time-Fenster
+wäre damit stillschweigend mit Gegenwarts-Daten kontaminiert gewesen — genau
+der Bug, vor dem der Artikel warnt. Fix: fetch_price_history schneidet das
+Fenster jetzt CLIENT-SEITIG hart auf [startTs, endTs].
+
+**Ehrliche Grenzen (unverändert):** Bewiesen sind TRENNUNG und VORZEICHEN
+(ruhige Märkte sind netto-positiv, laute negativ), NICHT die absolute Höhe —
+Rewards sind modelliert (comp_floor 500, depth x3, fill_prob 0.75). Die
+absoluten sel_OOS-Mittelwerte sind ausreißer-dominiert (Schwelle 0.0015 in
+Test 1: +32.7 vs 0.0020: -1.1) — vertraue der Positiv-Quote und sign_p, nicht
+den Mittelwerten. Die eine Zahl, die Paper von Real trennt, bleibt die
+LIVE-Capture-Quote.
+
+**Konsequenz:** Der Edge ist so hart abgesichert, wie es ohne Live-Messung
+geht (Code sauber + unvoreingenommen + zeitstabil). Nächster Schritt:
+Live-Pivot des Bots auf Reward-Maker mit Mikro-Limits und Capture messen.

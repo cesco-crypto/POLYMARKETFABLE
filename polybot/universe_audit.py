@@ -133,7 +133,8 @@ def build_universe_entries(markets: list[RewardMarket],
                            size: float | None = None,
                            min_history: int = 8,
                            max_markets: int | None = None,
-                           sleep_s: float = 0.05) -> list[dict]:
+                           sleep_s: float = 0.05,
+                           end_ts: int | None = None) -> list[dict]:
     """Reward-Märkte in Backtest-Entries überführen (History je Up-Token ziehen).
 
     WICHTIG gegen Survivorship: die Märkte werden in API-Reihenfolge genommen
@@ -147,7 +148,8 @@ def build_universe_entries(markets: list[RewardMarket],
     http = session or requests.Session()
     entries: list[dict] = []
     for m in markets:
-        hist = fetch_price_history(m.up_token, http, days=days, fidelity=fidelity)
+        hist = fetch_price_history(m.up_token, http, days=days,
+                                   fidelity=fidelity, end_ts=end_ts)
         if sleep_s:
             time.sleep(sleep_s)
         if len(hist) < min_history:
@@ -171,19 +173,31 @@ def run_universe_audit(days: int = 14, fidelity: int = 5,
                        thresholds=DEFAULT_THRESHOLDS,
                        max_markets: int | None = 400,
                        min_history: int = 8,
+                       offset_days: float = 0.0,
                        session: requests.Session | None = None) -> dict:
-    """Den vollständigen Audit fahren: Universum ziehen -> Entries -> Sweep -> Urteil."""
+    """Den vollständigen Audit fahren: Universum ziehen -> Entries -> Sweep -> Urteil.
+
+    `offset_days` > 0 verschiebt das Fensterende in die Vergangenheit
+    (Out-of-Time-Test gegen Regime-Glück): getestet wird dann das Fenster
+    [jetzt−offset−days, jetzt−offset]. Ehrliche Einschränkung: das Universum
+    stammt aus /sampling-markets von HEUTE — Märkte, die damals liefen und
+    inzwischen zu sind, fehlen (leichte Überlebens-Verzerrung des Universums,
+    nicht der Selektion; die Vol-Regel selbst bleibt Wall-sauber).
+    """
     http = session or requests.Session()
+    end_ts = int(time.time() - offset_days * 86400) if offset_days else None
     markets = fetch_reward_markets(http)
     log.info("Universum: %d reward-tragende Märkte gezogen", len(markets))
     entries = build_universe_entries(
         markets, http, days=days, fidelity=fidelity, comp_floor=comp_floor,
-        size=size, min_history=min_history, max_markets=max_markets)
+        size=size, min_history=min_history, max_markets=max_markets,
+        end_ts=end_ts)
     log.info("%d Märkte mit ausreichender Historie -> Backtest", len(entries))
     rows = universe_edge(entries, thresholds)
     return {
         "universe_n": len(markets),
         "tested_n": len(entries),
+        "offset_days": offset_days,
         "rows": rows,
         "verdict": verdict(rows),
     }
@@ -196,6 +210,8 @@ def _format_report(res: dict) -> str:
         "=" * 72,
         f"Universum (reward-tragend):   {res['universe_n']}",
         f"Getestet (genug Historie):    {res['tested_n']}",
+        f"Fenster-Offset:               {res.get('offset_days', 0):.0f} Tage "
+        f"{'(OUT-OF-TIME)' if res.get('offset_days') else '(aktuell)'}",
         "",
         f"{'Vol-Schwelle':>12} {'#sel':>5} {'pos%':>6} {'sel_OOS':>10} "
         f"{'rest_OOS':>10} {'Trennung':>10} {'sign_p':>9}",
@@ -232,10 +248,14 @@ def main(argv=None) -> int:
                          "API-Reihenfolge; 0 = kein Limit)")
     ap.add_argument("--size", type=float, default=None,
                     help="Feste Quote-Größe (Default: min_size je Markt)")
+    ap.add_argument("--offset-days", type=float, default=0.0,
+                    help="Fensterende N Tage in die Vergangenheit schieben "
+                         "(Out-of-Time-Test)")
     args = ap.parse_args(argv)
     res = run_universe_audit(days=args.days, fidelity=args.fidelity,
                              size=args.size,
-                             max_markets=args.max_markets or None)
+                             max_markets=args.max_markets or None,
+                             offset_days=args.offset_days)
     print(_format_report(res))
     return 0
 

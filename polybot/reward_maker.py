@@ -45,16 +45,27 @@ LOG_PATH = Path("data") / "reward_maker.jsonl"
 
 
 def fetch_price_history(token: str, session: requests.Session | None = None,
-                        days: int = 14, fidelity: int = 5) -> list[dict]:
-    """Mid-Preis-Historie eines Tokens (CLOB /prices-history), [{t, p}]."""
+                        days: int = 14, fidelity: int = 5,
+                        end_ts: int | None = None) -> list[dict]:
+    """Mid-Preis-Historie eines Tokens (CLOB /prices-history), [{t, p}].
+
+    `end_ts` verschiebt das Fensterende in die Vergangenheit (Out-of-Time-
+    Tests): None = jetzt. WICHTIG (Look-ahead-Schutz, Befund 09.07.): die API
+    IGNORIERT endTs teils und liefert Bars bis JETZT — das Fenster wird deshalb
+    client-seitig hart auf [startTs, endTs] geschnitten, sonst wäre ein
+    Out-of-Time-Fenster stillschweigend mit Gegenwarts-Daten kontaminiert.
+    """
     http = session or requests.Session()
-    now = int(time.time())
+    now = int(end_ts if end_ts is not None else time.time())
+    start = now - days * 86400
     try:
         r = http.get(f"{CLOB_HOST}/prices-history",
-                     params={"market": token, "startTs": now - days * 86400,
+                     params={"market": token, "startTs": start,
                              "endTs": now, "fidelity": fidelity}, timeout=30)
         r.raise_for_status()
-        return [{"t": p["t"], "p": float(p["p"])} for p in r.json().get("history", [])]
+        return [{"t": p["t"], "p": float(p["p"])}
+                for p in r.json().get("history", [])
+                if start <= p["t"] <= now]
     except (requests.RequestException, ValueError, KeyError, TypeError) as e:
         log.warning("prices-history für %s fehlgeschlagen: %s", token[:12], e)
         return []
