@@ -900,11 +900,17 @@ class LiveBroker(Broker):
                 # Ein Bein gefüllt, ein anderes gescheitert -> Waise glattstellen.
                 fills += self._unwind_group(group, {group: matched}, books,
                                             portfolio, fee_rates)
+        refreshed: set[str] = set()  # Tokens, deren Alt-Quotes dieser Tick schon gecancelt sind
         for s in singles:
             if self._fatal_reject is not None or self._token_blocked(s.token_id):
                 continue
             try:
                 from py_clob_client_v2.clob_types import OrderType
+                if s.replace and s.token_id not in refreshed:
+                    # Wie im seriellen Pfad: Alt-Quotes VOR dem Neu-Quote
+                    # canceln, sonst stapeln sich Requotes auf der Börse.
+                    self._cancel_open_orders(s.token_id)
+                    refreshed.add(s.token_id)
                 outcome, fill = self._submit_signal(s, OrderType.GTC, portfolio, fee_rates)
                 if outcome == "matched":
                     fills += 1
@@ -917,11 +923,15 @@ class LiveBroker(Broker):
 
         Jedes FOK-Bein muss die Market-Order-Präzision einhalten (BUY:
         Size*Preis max. 2 Nachkommastellen, SELL: max. 4) UND alle Beine
-        einer Gruppe müssen dieselbe Stückzahl behalten. Gruppen ohne
-        gültige gemeinsame Size werden verworfen (einmal geloggt) statt
-        vom Server abgelehnt zu werden.
+        einer Gruppe müssen dieselbe Stückzahl behalten. Zusätzlich muss
+        jedes Bein das Börsen-Mindest-Notional (1 USDC) erreichen — sonst
+        lehnt der Server ab, während das Gegenbein im Parallel-Modus schon
+        gefüllt ist. Gruppen ohne gültige gemeinsame Size werden verworfen
+        (einmal geloggt) statt vom Server abgelehnt zu werden.
         """
         import dataclasses
+
+        from polybot.orphan import OrphanFlattener
 
         groups: dict[str, list[Signal]] = {}
         for s in signals:
@@ -951,6 +961,16 @@ class LiveBroker(Broker):
                 drop.add(g)
                 log.info("Gruppe %s: keine börsenkonforme gemeinsame Size — "
                          "Gelegenheit übersprungen", g)
+                continue
+            # Mindest-Notional der Börse: ein marketable Bein darunter würde
+            # der Server ablehnen — im Parallel-Modus ist das Gegenbein dann
+            # schon gefüllt. Konservativ die ganze Gruppe verwerfen.
+            if any((k / 100) * (p / 1_000_000) < OrphanFlattener.MIN_NOTIONAL_USDC
+                   for p in prices):
+                drop.add(g)
+                log.info("Gruppe %s: Bein unter Mindest-Notional (%.2f USDC) "
+                         "bei gemeinsamer Size %.2f — Gelegenheit übersprungen",
+                         g, OrphanFlattener.MIN_NOTIONAL_USDC, k / 100)
                 continue
             common[g] = k / 100
         out: list[Signal] = []

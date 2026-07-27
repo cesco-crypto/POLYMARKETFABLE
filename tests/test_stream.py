@@ -129,6 +129,33 @@ def test_get_books_leer_ohne_verbindung():
     assert not s.connected
 
 
+def test_get_books_filtert_stale_buecher(monkeypatch):
+    # Regressionstest: schickt der Server für einen Token keine Updates mehr
+    # (recv-Timeout, Verbindung lebt), blieb das stille Stream-Buch ewig im
+    # Cache und überschrieb im Overlay den frischeren REST-Stand — FOK-Orders
+    # liefen gegen ein stales Buch. Nur frische Bücher dürfen durchkommen.
+    s = streamer_offline("t1", "t2")
+    s._handle_message(book_event("t1", bids=[(0.40, 10)], asks=[(0.45, 3)]))
+    s._handle_message(book_event("t2", bids=[(0.50, 10)], asks=[(0.55, 3)]))
+    # Verbindung steht (Thread braucht der Filter nicht).
+    monkeypatch.setattr(BookStreamer, "connected", property(lambda self: True))
+
+    # t1 zuletzt vor langer Zeit aktualisiert -> fällt aus dem Overlay,
+    # der Aufrufer nutzt dafür den REST-Stand; t2 bleibt frisch.
+    with s._lock:
+        s._updated["t1"] = time.monotonic() - 10_000
+    books = s.get_books(["t1", "t2"])
+    assert "t1" not in books
+    assert books["t2"].best_bid.price == 0.50
+
+    # Ein neues Delta macht das Buch wieder frisch -> Stream gewinnt wieder.
+    s._handle_message(json.dumps({
+        "event_type": "price_change", "asset_id": "t1",
+        "changes": [{"price": "0.41", "size": "4", "side": "BUY"}],
+    }))
+    assert s.get_books(["t1", "t2"])["t1"].best_bid.price == 0.41
+
+
 # ---------------------------------------------------------------------------
 # Thread: Subscribe, PING, Reconnect mit Backoff
 # ---------------------------------------------------------------------------

@@ -884,7 +884,11 @@ def cmd_run(cfg: BotConfig) -> None:
     streamer = None
     if cfg.strategy.use_stream:
         try:
-            streamer = BookStreamer(max_tokens=cfg.strategy.stream_max_tokens)
+            streamer = BookStreamer(
+                max_tokens=cfg.strategy.stream_max_tokens,
+                # Stale-Deckel wie der Snapshot-Altersdeckel im stream_loop:
+                # ältere Stream-Bücher überschreiben den REST-Stand nicht.
+                book_max_age_s=max(cfg.poll_interval_s * 3.0, 300.0))
             streamer.start()
             console.print(f"[green]WebSocket-Stream aktiv — Inner-Loop alle "
                           f"{cfg.strategy.stream_tick_s}s.[/green]")

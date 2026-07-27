@@ -43,6 +43,12 @@ PING_INTERVAL_S = 10.0
 # Sinnvolle Obergrenze pro Verbindung: der Server akzeptiert zwar mehr, aber
 # jenseits ~500 Tokens dominieren Snapshot-Fluten den Nutzen.
 MAX_STREAM_TOKENS = 500
+# Stream-Buch ohne Updates älter als so viele Sekunden gilt als stale: für
+# tote Tokens schickt der Server keine Deltas mehr, ohne dass die Verbindung
+# abbricht (recv-Timeout merkt davon nichts). Der Aufrufer fällt für solche
+# Tokens auf den REST-Stand zurück — gleiche Größenordnung wie der
+# Snapshot-Altersdeckel in main.stream_loop (max(poll_interval*3, 300s)).
+DEFAULT_BOOK_MAX_AGE_S = 300.0
 
 
 def _default_connect(url: str, timeout_s: float):
@@ -81,7 +87,8 @@ class BookStreamer:
                  recv_timeout_s: float = 2.0,
                  initial_backoff_s: float = 1.0,
                  max_backoff_s: float = 60.0,
-                 max_tokens: int = MAX_STREAM_TOKENS):
+                 max_tokens: int = MAX_STREAM_TOKENS,
+                 book_max_age_s: float = DEFAULT_BOOK_MAX_AGE_S):
         if connect is None and websocket is None:
             # Früh scheitern statt im Thread endlos zu reconnecten.
             raise ImportError("websocket-client ist nicht installiert")
@@ -92,9 +99,11 @@ class BookStreamer:
         self.initial_backoff_s = initial_backoff_s
         self.max_backoff_s = max_backoff_s
         self.max_tokens = max_tokens
+        self.book_max_age_s = book_max_age_s
 
         self._lock = threading.Lock()
         self._books: dict[str, OrderBook] = {}
+        self._updated: dict[str, float] = {}  # Token -> letztes Buch-Update (monotonic)
         self._tokens: list[str] = []
         self._token_set: set[str] = set()
         self._stop = threading.Event()
@@ -146,6 +155,8 @@ class BookStreamer:
             # Bücher nicht mehr abonnierter Tokens würden nur veralten.
             self._books = {t: b for t, b in self._books.items()
                            if t in self._token_set}
+            self._updated = {t: ts for t, ts in self._updated.items()
+                             if t in self._token_set}
         self._resubscribe.set()
         self.start()
 
@@ -154,13 +165,20 @@ class BookStreamer:
 
         Leeres Dict bei toter Verbindung — Signal an den Aufrufer, auf den
         REST-Pfad zurückzufallen, statt mit veralteten Büchern zu handeln.
-        Die zurückgegebenen OrderBook-Objekte werden nie mutiert (Updates
-        ersetzen sie komplett), Lesen ohne Lock ist danach sicher.
+        Dasselbe gilt pro Token für Bücher, deren letztes Update älter als
+        book_max_age_s ist: schickt der Server für einen Token nichts mehr,
+        darf das stille Stream-Buch den frischeren REST-Stand nicht
+        überschreiben. Die zurückgegebenen OrderBook-Objekte werden nie
+        mutiert (Updates ersetzen sie komplett), Lesen ohne Lock ist danach
+        sicher.
         """
         if not self.connected:
             return {}
+        now = time.monotonic()
         with self._lock:
-            return {t: self._books[t] for t in token_ids if t in self._books}
+            return {t: self._books[t] for t in token_ids
+                    if t in self._books
+                    and now - self._updated.get(t, 0.0) <= self.book_max_age_s}
 
     # ------------------------------------------------------------------
     # Hintergrund-Thread
@@ -188,6 +206,7 @@ class BookStreamer:
                 # frische book-Snapshots für alle Tokens.
                 with self._lock:
                     self._books.clear()
+                    self._updated.clear()
                 self._connected = True
                 backoff = self.initial_backoff_s
                 last_ping = time.monotonic()
@@ -261,6 +280,7 @@ class BookStreamer:
             # nicht wieder befüllen (Speicher bleibt so auch beschränkt).
             if tid in self._token_set:
                 self._books[tid] = book
+                self._updated[tid] = time.monotonic()
 
     def _apply_price_change(self, ev: dict) -> None:
         """Deltas anwenden. Zwei live beobachtete Formate:
@@ -306,3 +326,4 @@ class BookStreamer:
                 "bids": [{"price": p, "size": s} for p, s in bids.items()],
                 "asks": [{"price": p, "size": s} for p, s in asks.items()],
             })
+            self._updated[tid] = time.monotonic()

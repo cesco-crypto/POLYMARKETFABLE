@@ -315,6 +315,28 @@ def test_livebroker_parallel_unwind_bei_orphan():
     assert pf.realized_pnl == pytest.approx((0.29 - 0.30) * 10)
 
 
+def test_livebroker_parallel_cancelt_alt_quotes_bei_replace():
+    # Regressionstest: im Parallel-Pfad ignorierten Einzel-Signale ihr
+    # replace=True — Waisen-SELLs (orphan.py, alle 30s) stapelten sich auf
+    # der Börse, weil die vorige Order nie gecancelt wurde. Wie im seriellen
+    # Pfad muss der Cancel VOR dem neuen Quote abgeschlossen sein.
+    client = FakeClobClient()
+    broker = _parallel_broker(client)
+    pf = Portfolio(cash=100.0)
+    pf.positions["tok"] = Position(token_id="tok", shares=100, cost_basis=50)
+
+    # Tick 1: SELL-Quote platziert, nichts zu canceln
+    broker.execute([mm_quote("SELL", 0.52)], {}, pf)
+    assert client.cancelled == []
+    assert broker._open_orders["tok"] == ["oid1"]
+
+    # Tick 2: Alt-Quote wird zuerst gecancelt, genau eine neue Order raus
+    broker.execute([mm_quote("SELL", 0.51)], {}, pf)
+    assert client.cancelled == ["oid1"]
+    assert client.posted == ["tok", "tok"]
+    assert broker._open_orders["tok"] == ["oid2"]
+
+
 # ---- LiveBroker: unklare POST-Zustände & Matching-Delay --------------------
 
 def test_livebroker_verifiziert_zustand_nach_post_exception():
@@ -1082,6 +1104,29 @@ def test_fok_gruppe_ohne_konforme_size_wird_verworfen():
     books = {"yes": OrderBook(token_id="yes", bids=[], asks=[Level(0.99, 100)])}
     assert broker.execute(legs, books, pf) == 0
     assert client.posted == []  # nichts gesendet, nichts abgelehnt
+
+
+def test_fok_gruppe_unter_mindest_notional_wird_komplett_verworfen():
+    # Regressionstest: Komplement-Arb YES-Ask 0.06 / NO-Ask 0.90 mit kleiner
+    # Order — das billige Bein liegt unter dem 1-USDC-Mindest-Notional für
+    # marketable Orders (Server-Reject; im Parallel-Modus wäre das Gegenbein
+    # dann schon gefüllt -> Unwind-Verlust). Die ganze Gruppe muss verworfen
+    # werden, bevor irgendein Bein rausgeht.
+    client = FakeClobClient()
+    broker = make_live_broker(client)
+    pf = Portfolio(cash=1000.0)
+    legs = [
+        Signal(token_id="yes", side="BUY", price=0.06, size=6.0,
+               reason="arb", group="g1"),
+        Signal(token_id="no", side="BUY", price=0.90, size=6.0,
+               reason="arb", group="g1"),
+    ]
+    books = {t: OrderBook(token_id=t, bids=[], asks=[Level(0.99, 100)])
+             for t in ("yes", "no")}
+    # 6.0 * 0.06 = 0.36 USDC < 1.0 -> Gruppe verworfen, KEIN Bein gesendet.
+    assert broker.execute(legs, books, pf) == 0
+    assert client.posted == []
+    assert pf.positions == {}
 
 
 # ---- Delayed-Orders: size_matched ist die Wahrheit (erster Live-Trade 05.07.) --
