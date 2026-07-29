@@ -48,9 +48,15 @@ def test_impliziter_default_liest_config_yaml_im_cwd(tmp_path, monkeypatch):
 @pytest.mark.parametrize("yaml_text", [
     "poll_interval_s: 0\n",      # Busy-Loop: sleep(0) -> Dauerfeuer gegen die API
     "poll_interval_s: -5\n",
+    "mode: livve\n",             # Tippfehler darf nicht still in paper fallen
     "risk:\n  max_order_usdc: -1\n",
     "risk:\n  taker_fee_rate: 0.5\n",  # weit über dem Polymarket-Maximum 0.07
     "risk:\n  taker_fee_rate: -0.01\n",
+    "risk:\n  min_edge: -0.05\n",      # feuert auf garantiert verlustbringende Arbs
+    "risk:\n  daily_loss_limit_usdc: 0\n",  # Kill-Switch feuert sofort bei PnL 0.00
+    "strategy:\n  min_time_to_end_s: -3600\n",  # reaktiviert Phantom-Arbs (Markt tot)
+    "strategy:\n  arb_depth_margin: 0\n",  # deaktiviert den Survivability-Filter lautlos
+    "strategy:\n  arb_depth_margin: -1\n",
     "strategy:\n  stream_event_window_s: -1\n",  # 0 = aus, negativ = Fehler
     "strategy:\n  paper_fill_delay_ticks: -1\n",  # 0 = Sofort-Fill, negativ = Fehler
 ])
@@ -58,6 +64,26 @@ def test_unsinnige_werte_werden_abgewiesen(tmp_path, yaml_text):
     p = write_config(tmp_path, yaml_text)
     with pytest.raises(SystemExit):
         BotConfig.load(p)
+
+
+def test_mode_tippfehler_nennt_die_erlaubten_werte(tmp_path):
+    p = write_config(tmp_path, "mode: livve\n")
+    with pytest.raises(SystemExit, match="'paper' oder 'live'"):
+        BotConfig.load(p)
+
+
+def test_kantige_aber_legitime_werte_laden_weiterhin(tmp_path):
+    # 0 ist bei diesen Feldern legitim (Schwelle/Filter ohne Puffer bzw.
+    # Prüfung aus) — nur negative bzw. unsinnige Werte sind Fehler.
+    p = write_config(tmp_path,
+                     "risk:\n  min_edge: 0\n"
+                     "strategy:\n  min_time_to_end_s: 0\n  arb_depth_margin: 1.0\n")
+    cfg = BotConfig.load(p)
+    assert cfg.risk.min_edge == 0
+    assert cfg.strategy.min_time_to_end_s == 0
+    assert cfg.strategy.arb_depth_margin == 1.0
+    # Default bleibt: Modus paper ohne YAML-Angabe.
+    assert BotConfig.load(write_config(tmp_path, "risk: {}\n")).mode == "paper"
 
 
 def test_stream_event_window_default_und_yaml_ladbar(tmp_path):

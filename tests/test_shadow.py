@@ -371,3 +371,74 @@ def test_stray_fill_mit_altem_reason_findet_die_episode(tmp_path):
     t.observe([], make_books(), [fill], ts=1_005.0)
     recs = t.flush()
     assert recs[0].live_fill == pytest.approx(6.0)
+
+
+def test_unwind_nettiert_die_episode_und_wird_ausgewiesen(tmp_path):
+    """Befund H1: FOK-Race — Bein 1 füllt live, Bein 2 scheitert, der
+    LiveBroker stellt Bein 1 per Unwind glatt (reason 'Unwind <gruppe>').
+    Ökonomisch ein Verlust-Trade: der Bein-Fill darf die Capture-Quote
+    NICHT erhöhen — die Episode zählt netto 0 live, der Unwind wird
+    separat ausgewiesen."""
+    t = tracker(tmp_path)
+    sigs = [
+        Signal(token_id="t1", side="BUY", price=0.50, size=10.0,
+               reason=REASON, group="comp:0xabc", expected_edge=0.5),
+        Signal(token_id="t2", side="BUY", price=0.40, size=10.0,
+               reason=REASON, group="comp:0xabc", expected_edge=0.0),
+    ]
+    books = make_books("t1") | make_books("t2", ask=0.40)
+    fills = [
+        live_fill(10.0, token="t1", price=0.50),            # Bein-1-Fill
+        Fill(ts=1_000.0, token_id="t1", side="SELL", price=0.49,
+             size=10.0, reason="Unwind comp:0xabc"),        # Glattstellung
+    ]
+    t.observe(sigs, books, fills, ts=1_000.0)
+    recs = t.flush()
+    leg1 = next(r for r in recs if r.token_id == "t1")
+    assert leg1.paper_fill == pytest.approx(10.0)
+    assert leg1.live_fill == pytest.approx(0.0)   # netto: nichts gecapturet
+    assert leg1.capture_ratio == pytest.approx(0.0)
+    assert leg1.unwound == pytest.approx(10.0)
+
+    # In der Aggregation: Quote 0 trotz 10 Shares Live-Fill, Unwind sichtbar.
+    agg = aggregate_capture(load_shadow(tmp_path / "shadow.jsonl"))
+    assert agg["overall"]["capture"] == pytest.approx(0.0)
+    assert agg["unwind_records"] == 1
+    assert agg["unwind_notional"] == pytest.approx(10.0 * 0.50)
+
+
+def test_komplett_gefuellte_gruppe_zaehlt_weiterhin_voll(tmp_path):
+    """Gegenprobe zu H1: ohne Unwind zählt ein sauberer Gruppen-Fill voll."""
+    t = tracker(tmp_path)
+    sigs = [
+        Signal(token_id="t1", side="BUY", price=0.50, size=10.0,
+               reason=REASON, group="comp:0xabc", expected_edge=0.5),
+        Signal(token_id="t2", side="BUY", price=0.40, size=10.0,
+               reason=REASON, group="comp:0xabc", expected_edge=0.0),
+    ]
+    books = make_books("t1") | make_books("t2", ask=0.40)
+    fills = [live_fill(10.0, token="t1", price=0.50),
+             live_fill(10.0, token="t2", price=0.40)]
+    t.observe(sigs, books, fills, ts=1_000.0)
+    recs = t.flush()
+    assert all(r.capture_ratio == pytest.approx(1.0) for r in recs)
+    assert all(r.unwound == 0.0 for r in recs)
+    agg = aggregate_capture(load_shadow(tmp_path / "shadow.jsonl"))
+    assert agg["overall"]["capture"] == pytest.approx(1.0)
+    assert agg["unwind_records"] == 0
+
+
+def test_aggregate_episoden_summe_kappt_nicht_bei_einfacher_size():
+    """Befund M5: paper_fill ist die Episoden-SUMME über mehrere Fill-Ticks
+    und kann ein Mehrfaches von size betragen — die Hochrechnung darf nicht
+    auf 1x size kappen (ehrlicher Deckel: episode_ticks)."""
+    r = row(0.0, "complement_arb", paper=25.0, live=25.0, size=10.0, edge=1.0)
+    r["episode_ticks"] = 3            # 2.5x size gefüllt, Deckel 3x
+    r2 = row(100.0, "complement_arb", paper=10.0, live=10.0, size=10.0, edge=1.0)
+    agg = aggregate_capture([r, r2])
+    # Früher: 1.0 + 1.0 (auf size gekappt) — jetzt 2.5 + 1.0.
+    assert agg["paper_edge_total"] == pytest.approx(2.5 + 1.0)
+    # Schutzdeckel bleibt: über episode_ticks hinaus wird nicht hochgerechnet.
+    r["episode_ticks"] = 2
+    agg = aggregate_capture([r, r2])
+    assert agg["paper_edge_total"] == pytest.approx(2.0 + 1.0)

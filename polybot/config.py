@@ -203,12 +203,31 @@ class BotConfig:
             risk=section("risk", RiskConfig),
             strategy=section("strategy", StrategyConfig),
         )
+        if cfg.mode not in ("paper", "live"):
+            raise SystemExit(
+                f"mode '{cfg.mode}' ist ungültig — erlaubt: 'paper' oder 'live'. "
+                "Ein Tippfehler darf nicht still in den Paper-Modus fallen")
         if cfg.poll_interval_s <= 0:
             raise SystemExit("poll_interval_s muss > 0 sein")
         for name in ("max_order_usdc", "max_position_usdc",
-                     "max_total_exposure_usdc", "daily_loss_limit_usdc"):
+                     "max_total_exposure_usdc"):
             if getattr(cfg.risk, name) < 0:
                 raise SystemExit(f"risk.{name} darf nicht negativ sein")
+        if cfg.risk.daily_loss_limit_usdc <= 0:
+            raise SystemExit("risk.daily_loss_limit_usdc muss > 0 sein — "
+                             "bei 0 feuert der Kill-Switch sofort bei PnL 0.00")
+        if cfg.risk.min_edge < 0:
+            raise SystemExit("risk.min_edge darf nicht negativ sein — sonst "
+                             "feuern die Strategien auf garantiert "
+                             "verlustbringende 'Arbs'")
+        if cfg.strategy.min_time_to_end_s < 0:
+            raise SystemExit("strategy.min_time_to_end_s darf nicht negativ "
+                             "sein — sonst werden abgelaufene Märkte wieder "
+                             "handelbar (Phantom-Arbs)")
+        if cfg.strategy.arb_depth_margin <= 0:
+            raise SystemExit("strategy.arb_depth_margin muss > 0 sein — "
+                             "0/negativ deaktiviert den Survivability-Filter "
+                             "lautlos (1.0 = nur Top-of-Book, >1 = Puffer)")
         if cfg.strategy.min_order_shares < 0:
             raise SystemExit("strategy.min_order_shares darf nicht negativ sein")
         if cfg.strategy.stream_tick_s <= 0:

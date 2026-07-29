@@ -18,6 +18,10 @@ Ehrliche Grenzen der Messung:
   nicht gekappt, die Aggregation gewichtet ohnehin über Notional-Summen.
 - Ohne Paper-Fill (paper_fill == 0) ist die Quote undefiniert (null im JSONL)
   und fließt nicht in die Aggregation ein.
+- Unwind-Gegenorders (reason 'Unwind <gruppe>' nach einem FOK-Race) werden
+  ihrer Ursprungs-Episode zugerechnet und NETTO gegen den Bein-Fill
+  gerechnet — ein glattgestelltes Bein war ökonomisch ein Verlust-Trade und
+  darf die Capture-Quote nicht erhöhen. Der Report weist sie separat aus.
 """
 
 from __future__ import annotations
@@ -90,6 +94,7 @@ class ShadowRecord:
     capture_ratio: float | None
     episode_ticks: int = 1  # wie oft die Gelegenheit signalisiert hat
     episode_s: float = 0.0  # Episodendauer (letzter - erster Tick)
+    unwound: float = 0.0    # per Unwind glattgestellte Größe (FOK-Race)
 
 
 def _sum_by_key(fills: list[Fill]) -> dict[tuple[str, str, str], float]:
@@ -117,6 +122,7 @@ class _Leg:
                               # Fix 3 selbst — ein zweiter Fill heisst echte
                               # neue Liquidität, symmetrisch zu live_total)
     live_total: float = 0.0   # Summe aller Live-Fills der Episode
+    unwound: float = 0.0      # davon per Unwind glattgestellt (netto abgezogen)
 
 
 @dataclass
@@ -268,7 +274,23 @@ class ShadowTracker:
         kommen auch nach >30s Signal-Stille). Ohne Treffer entsteht eine
         synthetische Einzel-Bein-Episode (paper=0, Quote None) — der Fill
         bleibt sichtbar statt still zu verschwinden.
+
+        Sonderfall Unwind (Befund H1): die Gegenorder nach einem FOK-Race
+        trägt den reason 'Unwind <gruppe>' und gehört NETTO in die Episode
+        dieser Gruppe — das zuvor gefüllte Bein war ökonomisch ein
+        Verlust-Trade, kein erfolgreiches Capture.
         """
+        if reason.startswith("Unwind "):
+            ep = self._episodes.get(reason.split(" ", 1)[1])
+            if ep is not None:
+                leg = ep.legs.get(f"{token}|{'BUY' if side == 'SELL' else 'SELL'}")
+                if leg is not None:
+                    leg.live_total = max(0.0, leg.live_total - size)
+                    leg.unwound += size
+                    ep.last_ts = max(ep.last_ts, ts)
+                    return
+            # Episode schon geschlossen (oder Bein-Schlüssel verfehlt):
+            # normaler Stray-Pfad — der Fill bleibt sichtbar.
         strat = strategy_from_reason(reason)
         legkey = f"{token}|{side}"
         candidates = [ep for ep in self._episodes.values() if legkey in ep.legs]
@@ -302,7 +324,7 @@ class ShadowTracker:
                     expected_edge=leg.expected_edge,
                     paper_fill=leg.paper_total, live_fill=leg.live_total,
                     capture_ratio=ratio, episode_ticks=ep.ticks,
-                    episode_s=ep.last_ts - ep.first_ts))
+                    episode_s=ep.last_ts - ep.first_ts, unwound=leg.unwound))
             del self._episodes[key]
         return out
 
@@ -385,11 +407,20 @@ def aggregate_capture(rows: list[dict]) -> dict:
     by_strategy: dict[str, dict] = {}
     by_hour: dict[str, dict] = {}
     paper_edge_total = 0.0
+    unwind_records = 0
+    unwind_notional = 0.0
     for r in rows:
         price = r.get("price", 0.0)
         paper, live = r.get("paper_fill", 0.0), r.get("live_fill", 0.0)
         strat = r.get("strategy", "unknown")
         hour = time.strftime("%Y-%m-%d %H:00", time.gmtime(r["ts"]))
+        unwound = r.get("unwound", 0.0)
+        if unwound > 1e-9:
+            # FOK-Race-Anteil separat ausweisen (Befund H1): die Episode
+            # ist bereits netto (live_fill abzüglich Glattstellung) in der
+            # Quote — hier nur die Diagnose, wie oft es race't.
+            unwind_records += 1
+            unwind_notional += unwound * price
         for b in (overall, by_strategy.setdefault(strat, _bucket()),
                   by_hour.setdefault(hour, _bucket())):
             b["n"] += 1
@@ -404,9 +435,14 @@ def aggregate_capture(rows: list[dict]) -> dict:
                                             + live * price)
         size = r.get("size", 0.0)
         if size > 0 and paper > 0:
-            # min(…, 1.0): ein Paper-Fill über Signalgröße kommt nicht vor,
-            # aber kaputte Log-Zeilen sollen die Hochrechnung nicht aufblasen.
-            paper_edge_total += r.get("expected_edge", 0.0) * min(paper / size, 1.0)
+            # paper_fill ist die Episoden-SUMME über bis zu episode_ticks
+            # Fill-Ticks (pro Tick höchstens size Shares) — die Kappung auf
+            # 1.0 unterbewertete mehrfach gefüllte Episoden (Befund M5).
+            # Der Tick-Deckel bleibt: kaputte Log-Zeilen sollen die
+            # Hochrechnung nicht aufblasen.
+            ticks = max(int(r.get("episode_ticks", 1) or 1), 1)
+            paper_edge_total += r.get("expected_edge", 0.0) \
+                * min(paper / size, float(ticks))
     _finalize(overall)
     for b in by_strategy.values():
         _finalize(b)
@@ -432,4 +468,6 @@ def aggregate_capture(rows: list[dict]) -> dict:
         "paper_edge_total": paper_edge_total,
         "paper_edge_per_day": paper_edge_per_day,
         "live_edge_per_day": live_edge_per_day,
+        "unwind_records": unwind_records,
+        "unwind_notional": unwind_notional,
     }

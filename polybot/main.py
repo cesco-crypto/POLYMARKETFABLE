@@ -1128,6 +1128,12 @@ def cmd_capture_report(cfg: BotConfig,
     console.print(f"[bold]Capture gesamt:[/bold] {fmt_capture(o)} "
                   f"(Paper {o['paper_notional']:.2f} USDC Notional gefüllt, "
                   f"live {o['live_notional']:.2f})")
+    if agg.get("unwind_records"):
+        # FOK-Race-Sichtbarkeit (Befund H1): diese Episoden sind netto
+        # bereits aus der Quote — hier nur der Anteil für den Betreiber.
+        console.print(f"[yellow]FOK-Race-Unwinds: {agg['unwind_records']} "
+                      f"Bein-Datensätze, {agg['unwind_notional']:.2f} USDC "
+                      "glattgestellt — netto nicht als Capture gezählt[/yellow]")
 
     table = Table(title="Capture pro Strategie")
     for col in ("Strategie", "Signale", "Paper (USDC)", "Live (USDC)", "Capture"):
