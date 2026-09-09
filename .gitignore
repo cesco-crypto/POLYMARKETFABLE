@@ -34,3 +34,16 @@ live_state.tmp
 # OpenWiki-Laufzeitdateien (Wiki selbst wird committet)
 openwiki/.env
 openwiki/_plan.md
+
+# Video-Produktion (video/) — Rohmaterial und Render-Zwischenstände nicht committen
+video/input/*
+!video/input/.gitkeep
+video/projects/*/assets/source.mp4
+video/projects/*/assets/source.*
+video/projects/*/audio.*
+video/projects/*/renders/
+video/projects/*/snapshots/
+video/projects/*/frames*/
+video/projects/*/node_modules/
+video/projects/*/.hyperframes/
+video/projects/*/*.log
