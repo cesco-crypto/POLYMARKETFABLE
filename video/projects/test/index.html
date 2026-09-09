@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="de" data-resolution="portrait">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1080, height=1920" />
+    <script src="assets/vendor/gsap.min.js"></script>
+    <style>
+      @font-face {
+        font-family: "Inter";
+        src: url("assets/vendor/fonts/Inter-Variable.woff2") format("woff2");
+        font-weight: 100 900;
+        font-style: normal;
+        font-display: block;
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        width: 1080px;
+        height: 1920px;
+        overflow: hidden;
+        background: #0b0f1a;
+      }
+      body {
+        font-family: "Inter", "Helvetica Neue", Arial, sans-serif;
+        color: #ffffff;
+      }
+      #root {
+        position: relative;
+        width: 1080px;
+        height: 1920px;
+        background: #0b0f1a;
+      }
+      /* Safe zone: 250px top, 350px bottom stay free for the Instagram UI */
+      #safe {
+        position: absolute;
+        left: 80px;
+        top: 250px;
+        width: 920px;
+        height: 1320px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        gap: 80px;
+      }
+      #title {
+        font-size: 160px;
+        font-weight: 900;
+        letter-spacing: -0.03em;
+        line-height: 1;
+      }
+      #chart {
+        width: 760px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 40px;
+      }
+      #value {
+        font-size: 140px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+        line-height: 1;
+        color: #4ade80;
+      }
+      #track {
+        position: relative;
+        width: 760px;
+        height: 90px;
+        border-radius: 45px;
+        background: #1e2637;
+        overflow: hidden;
+      }
+      #bar {
+        position: absolute;
+        left: 0;
+        top: 0;
+        height: 90px;
+        width: 760px;
+        border-radius: 45px;
+        background: linear-gradient(90deg, #22c55e, #4ade80);
+        transform-origin: left center;
+      }
+      #scale {
+        display: flex;
+        justify-content: space-between;
+        width: 760px;
+        font-size: 36px;
+        font-weight: 500;
+        color: #94a3b8;
+      }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      data-composition-id="main"
+      data-start="0"
+      data-duration="5"
+      data-width="1080"
+      data-height="1920"
+    >
+      <div id="safe">
+        <div id="title" class="clip" data-start="0" data-duration="5" data-track-index="1">Test</div>
+        <div id="chart" class="clip" data-start="0.6" data-duration="4.4" data-track-index="2">
+          <div id="value">0,0 %</div>
+          <div id="track"><div id="bar"></div></div>
+          <div id="scale"><span>0 %</span><span>5 %</span></div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const tl = gsap.timeline({ paused: true });
+      const TARGET = 4.5; // Testwert
+      const MAX = 5; // Skala 0-5 %
+      const counter = { v: 0 };
+      const valueEl = document.getElementById("value");
+
+      tl.fromTo("#title", { opacity: 0, y: 60 }, { opacity: 1, y: 0, duration: 0.7, ease: "power3.out" }, 0);
+      tl.fromTo("#chart", { opacity: 0, y: 40 }, { opacity: 1, y: 0, duration: 0.5, ease: "power2.out" }, 0.6);
+      tl.fromTo("#bar", { scaleX: 0 }, { scaleX: TARGET / MAX, duration: 1.8, ease: "power2.out" }, 1.0);
+      tl.to(
+        counter,
+        {
+          v: TARGET,
+          duration: 1.8,
+          ease: "power2.out",
+          onUpdate: () => {
+            valueEl.textContent = counter.v.toFixed(1).replace(".", ",") + " %";
+          },
+        },
+        1.0,
+      );
+
+      window.__timelines["main"] = tl;
+    </script>
+  </body>
+</html>

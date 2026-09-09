@@ -65,3 +65,8 @@ Einstieg: `openwiki/quickstart.md` (Landkarte aller Module und Seiten).
 Die tägliche Auto-Aktualisierung läuft über
 `.github/workflows/openwiki-update.yml` (braucht ANTHROPIC_API_KEY oder
 OPENROUTER_API_KEY als Repo-Secret).
+
+## Video-Produktion (Instagram-Reels)
+Separater Arbeitsbereich in `video/` mit eigener `video/CLAUDE.md`
+(HyperFrames-Workflow: Rohvideo in `video/input/` → «neues Video» →
+fertiges Reel in `video/output/`). Der Trading-Bot bleibt davon unberührt.

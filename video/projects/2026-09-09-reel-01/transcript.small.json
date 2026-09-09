@@ -1,0 +1,702 @@
+[
+  {
+    "text": "Die",
+    "start": 0,
+    "end": 0.35
+  },
+  {
+    "text": "Krankenkassenprämie",
+    "start": 0.35,
+    "end": 2.6
+  },
+  {
+    "text": "sind",
+    "start": 2.6,
+    "end": 2.93
+  },
+  {
+    "text": "wieder",
+    "start": 2.93,
+    "end": 3.44
+  },
+  {
+    "text": "um",
+    "start": 3.44,
+    "end": 3.72
+  },
+  {
+    "text": "7,4%",
+    "start": 3.72,
+    "end": 4.94
+  },
+  {
+    "text": "gestiegen,",
+    "start": 4.95,
+    "end": 6.44
+  },
+  {
+    "text": "gemäß",
+    "start": 6.44,
+    "end": 6.74
+  },
+  {
+    "text": "BAAG",
+    "start": 6.74,
+    "end": 7
+  },
+  {
+    "text": "Bundesamt",
+    "start": 7,
+    "end": 8.44
+  },
+  {
+    "text": "für",
+    "start": 8.44,
+    "end": 8.68
+  },
+  {
+    "text": "Gesundheit.",
+    "start": 8.68,
+    "end": 10
+  },
+  {
+    "text": "Für",
+    "start": 10,
+    "end": 10.16
+  },
+  {
+    "text": "Familie",
+    "start": 10.16,
+    "end": 10.53
+  },
+  {
+    "text": "bedeutet",
+    "start": 10.53,
+    "end": 10.95
+  },
+  {
+    "text": "das",
+    "start": 10.95,
+    "end": 11.11
+  },
+  {
+    "text": "jährlich",
+    "start": 11.11,
+    "end": 11.52
+  },
+  {
+    "text": "durchschnittliche",
+    "start": 11.53,
+    "end": 12.42
+  },
+  {
+    "text": "Mehrkosten",
+    "start": 12.42,
+    "end": 13
+  },
+  {
+    "text": "von",
+    "start": 13,
+    "end": 13.37
+  },
+  {
+    "text": "rund",
+    "start": 13.37,
+    "end": 13.87
+  },
+  {
+    "text": "224",
+    "start": 13.87,
+    "end": 14.98
+  },
+  {
+    "text": "Kranken",
+    "start": 14.98,
+    "end": 15.85
+  },
+  {
+    "text": "pro",
+    "start": 15.85,
+    "end": 16.21
+  },
+  {
+    "text": "Person.",
+    "start": 16.22,
+    "end": 17
+  },
+  {
+    "text": "Bei",
+    "start": 17,
+    "end": 17.23
+  },
+  {
+    "text": "einer",
+    "start": 17.23,
+    "end": 17.61
+  },
+  {
+    "text": "vierköpfigen",
+    "start": 17.61,
+    "end": 18.51
+  },
+  {
+    "text": "Familie",
+    "start": 18.51,
+    "end": 19.03
+  },
+  {
+    "text": "macht",
+    "start": 19.04,
+    "end": 19.42
+  },
+  {
+    "text": "das",
+    "start": 19.42,
+    "end": 19.64
+  },
+  {
+    "text": "gerne",
+    "start": 19.65,
+    "end": 20.03
+  },
+  {
+    "text": "mal",
+    "start": 20.03,
+    "end": 20.26
+  },
+  {
+    "text": "über",
+    "start": 20.26,
+    "end": 20.56
+  },
+  {
+    "text": "600",
+    "start": 20.56,
+    "end": 21.25
+  },
+  {
+    "text": "bis",
+    "start": 21.25,
+    "end": 21.48
+  },
+  {
+    "text": "700",
+    "start": 21.48,
+    "end": 22.15
+  },
+  {
+    "text": "Franken",
+    "start": 22.17,
+    "end": 22.7
+  },
+  {
+    "text": "aus,",
+    "start": 22.7,
+    "end": 23
+  },
+  {
+    "text": "wo",
+    "start": 23,
+    "end": 23.12
+  },
+  {
+    "text": "man",
+    "start": 23.12,
+    "end": 23.3
+  },
+  {
+    "text": "mehr",
+    "start": 23.3,
+    "end": 23.54
+  },
+  {
+    "text": "für",
+    "start": 23.54,
+    "end": 23.72
+  },
+  {
+    "text": "die",
+    "start": 23.72,
+    "end": 23.9
+  },
+  {
+    "text": "Krankenkassen",
+    "start": 23.9,
+    "end": 24.67
+  },
+  {
+    "text": "zahlt.",
+    "start": 24.67,
+    "end": 25
+  },
+  {
+    "text": "Genau",
+    "start": 25,
+    "end": 25.41
+  },
+  {
+    "text": "deshalb",
+    "start": 25.41,
+    "end": 25.99
+  },
+  {
+    "text": "kommt",
+    "start": 25.99,
+    "end": 26.4
+  },
+  {
+    "text": "der",
+    "start": 26.4,
+    "end": 26.64
+  },
+  {
+    "text": "AXA",
+    "start": 26.65,
+    "end": 26.89
+  },
+  {
+    "text": "Wechsel",
+    "start": 26.89,
+    "end": 27.46
+  },
+  {
+    "text": "Service",
+    "start": 27.46,
+    "end": 28.04
+  },
+  {
+    "text": "aus",
+    "start": 28.04,
+    "end": 28.29
+  },
+  {
+    "text": "Spien.",
+    "start": 28.29,
+    "end": 29
+  },
+  {
+    "text": "Das",
+    "start": 29,
+    "end": 29.47
+  },
+  {
+    "text": "AXA",
+    "start": 29.47,
+    "end": 29.91
+  },
+  {
+    "text": "Wechsel",
+    "start": 29.92,
+    "end": 31.01
+  },
+  {
+    "text": "Service",
+    "start": 31.01,
+    "end": 32.1
+  },
+  {
+    "text": "bietet",
+    "start": 32.11,
+    "end": 33.04
+  },
+  {
+    "text": "den",
+    "start": 33.04,
+    "end": 33.51
+  },
+  {
+    "text": "Service",
+    "start": 33.51,
+    "end": 34.61
+  },
+  {
+    "text": "an,",
+    "start": 34.61,
+    "end": 35
+  },
+  {
+    "text": "damit",
+    "start": 35,
+    "end": 35.6
+  },
+  {
+    "text": "du",
+    "start": 35.6,
+    "end": 35.84
+  },
+  {
+    "text": "und",
+    "start": 35.84,
+    "end": 36.2
+  },
+  {
+    "text": "für",
+    "start": 36.2,
+    "end": 36.55
+  },
+  {
+    "text": "dich",
+    "start": 36.58,
+    "end": 37.03
+  },
+  {
+    "text": "und",
+    "start": 37.04,
+    "end": 37.4
+  },
+  {
+    "text": "deine",
+    "start": 37.4,
+    "end": 38
+  },
+  {
+    "text": "Familie",
+    "start": 38,
+    "end": 38.85
+  },
+  {
+    "text": "jedes",
+    "start": 38.85,
+    "end": 39.45
+  },
+  {
+    "text": "Jahr",
+    "start": 39.45,
+    "end": 40
+  },
+  {
+    "text": "automatisiert",
+    "start": 40,
+    "end": 41
+  },
+  {
+    "text": "die",
+    "start": 41,
+    "end": 41.23
+  },
+  {
+    "text": "günstigste",
+    "start": 41.23,
+    "end": 42
+  },
+  {
+    "text": "Grundversicherung",
+    "start": 42,
+    "end": 42.82
+  },
+  {
+    "text": "hat,",
+    "start": 42.82,
+    "end": 43
+  },
+  {
+    "text": "sodass",
+    "start": 43,
+    "end": 43.34
+  },
+  {
+    "text": "du",
+    "start": 43.34,
+    "end": 43.45
+  },
+  {
+    "text": "einfach",
+    "start": 43.45,
+    "end": 43.86
+  },
+  {
+    "text": "von",
+    "start": 43.86,
+    "end": 44.03
+  },
+  {
+    "text": "Struff",
+    "start": 44.03,
+    "end": 44.37
+  },
+  {
+    "text": "klicken",
+    "start": 44.37,
+    "end": 44.77
+  },
+  {
+    "text": "und",
+    "start": 44.77,
+    "end": 44.93
+  },
+  {
+    "text": "akzeptieren",
+    "start": 44.94,
+    "end": 45.55
+  },
+  {
+    "text": "kannst.",
+    "start": 45.56,
+    "end": 46
+  },
+  {
+    "text": "Und",
+    "start": 46,
+    "end": 46.26
+  },
+  {
+    "text": "gleichzeitig",
+    "start": 46.26,
+    "end": 47.32
+  },
+  {
+    "text": "erspartst",
+    "start": 47.32,
+    "end": 48.1
+  },
+  {
+    "text": "du",
+    "start": 48.1,
+    "end": 48.27
+  },
+  {
+    "text": "dir",
+    "start": 48.27,
+    "end": 48.53
+  },
+  {
+    "text": "auch",
+    "start": 48.53,
+    "end": 48.88
+  },
+  {
+    "text": "den",
+    "start": 48.88,
+    "end": 49.14
+  },
+  {
+    "text": "Aufwand,",
+    "start": 49.14,
+    "end": 50
+  },
+  {
+    "text": "dass",
+    "start": 50,
+    "end": 50.4
+  },
+  {
+    "text": "du",
+    "start": 50.4,
+    "end": 50.6
+  },
+  {
+    "text": "die",
+    "start": 50.6,
+    "end": 50.9
+  },
+  {
+    "text": "Rechnungen",
+    "start": 50.9,
+    "end": 51.9
+  },
+  {
+    "text": "nicht",
+    "start": 51.9,
+    "end": 52.41
+  },
+  {
+    "text": "mehr",
+    "start": 52.41,
+    "end": 52.81
+  },
+  {
+    "text": "A",
+    "start": 52.81,
+    "end": 52.91
+  },
+  {
+    "text": "oder",
+    "start": 52.91,
+    "end": 53.31
+  },
+  {
+    "text": "Bschicken",
+    "start": 53.31,
+    "end": 54.21
+  },
+  {
+    "text": "musst,",
+    "start": 54.21,
+    "end": 55
+  },
+  {
+    "text": "sondern",
+    "start": 55,
+    "end": 55.45
+  },
+  {
+    "text": "du",
+    "start": 55.45,
+    "end": 55.57
+  },
+  {
+    "text": "genau",
+    "start": 55.57,
+    "end": 55.89
+  },
+  {
+    "text": "weißt",
+    "start": 55.89,
+    "end": 56.2
+  },
+  {
+    "text": "einfach",
+    "start": 56.2,
+    "end": 56.64
+  },
+  {
+    "text": "AXA,",
+    "start": 56.65,
+    "end": 56.98
+  },
+  {
+    "text": "Schick",
+    "start": 57,
+    "end": 57.84
+  },
+  {
+    "text": "und",
+    "start": 57.84,
+    "end": 58.26
+  },
+  {
+    "text": "AXA,",
+    "start": 58.26,
+    "end": 59
+  },
+  {
+    "text": "managst",
+    "start": 59,
+    "end": 59.32
+  },
+  {
+    "text": "du",
+    "start": 59.32,
+    "end": 59.41
+  },
+  {
+    "text": "das",
+    "start": 59.41,
+    "end": 59.55
+  },
+  {
+    "text": "für",
+    "start": 59.55,
+    "end": 59.69
+  },
+  {
+    "text": "das.",
+    "start": 59.69,
+    "end": 60
+  },
+  {
+    "text": "Prick",
+    "start": 60,
+    "end": 60.33
+  },
+  {
+    "text": "jetzt",
+    "start": 60.33,
+    "end": 60.67
+  },
+  {
+    "text": "auf",
+    "start": 60.67,
+    "end": 60.87
+  },
+  {
+    "text": "den",
+    "start": 60.87,
+    "end": 61.07
+  },
+  {
+    "text": "Link",
+    "start": 61.07,
+    "end": 61.34
+  },
+  {
+    "text": "hier",
+    "start": 61.34,
+    "end": 61.6
+  },
+  {
+    "text": "unten",
+    "start": 61.62,
+    "end": 61.98
+  },
+  {
+    "text": "und",
+    "start": 62,
+    "end": 62.34
+  },
+  {
+    "text": "wenn",
+    "start": 62.34,
+    "end": 62.79
+  },
+  {
+    "text": "du",
+    "start": 62.8,
+    "end": 63.03
+  },
+  {
+    "text": "mehr",
+    "start": 63.03,
+    "end": 63.49
+  },
+  {
+    "text": "Infos",
+    "start": 63.49,
+    "end": 64.05
+  },
+  {
+    "text": "möchtest,",
+    "start": 64.06,
+    "end": 65.15
+  },
+  {
+    "text": "schrei",
+    "start": 65.15,
+    "end": 65.62
+  },
+  {
+    "text": "bei",
+    "start": 65.62,
+    "end": 65.86
+  },
+  {
+    "text": "uns",
+    "start": 65.86,
+    "end": 66.1
+  },
+  {
+    "text": "ein",
+    "start": 66.1,
+    "end": 66.34
+  },
+  {
+    "text": "WhatsApp.",
+    "start": 66.34,
+    "end": 67
+  },
+  {
+    "text": "Und",
+    "start": 67,
+    "end": 67.36
+  },
+  {
+    "text": "schönen",
+    "start": 67.37,
+    "end": 68.24
+  },
+  {
+    "text": "Tag!",
+    "start": 68.24,
+    "end": 68.98
+  }
+]
