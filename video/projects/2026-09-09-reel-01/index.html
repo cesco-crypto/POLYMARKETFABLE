@@ -1,59 +1,83 @@
 <!doctype html>
-<html lang="en" data-resolution="portrait">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=1080, height=1920" />
-    <script src="assets/vendor/gsap.min.js"></script>
-    <style>
-      * {
-        margin: 0;
-        padding: 0;
-        box-sizing: border-box;
-      }
-      html,
-      body {
-        margin: 0;
-        width: 1080px;
-        height: 1920px;
-        overflow: hidden;
-        background: #000;
-      }
-      body {
-        font-family: "Inter", sans-serif;
-      }
-      code,
-      pre,
-      .monospace {
-        font-family: "JetBrains Mono", monospace;
-      }
-    </style>
-  </head>
-  <body>
-    <div
-      id="root"
-      data-composition-id="main"
-      data-start="0"
-      data-duration="10"
-      data-width="1080"
-      data-height="1920"
-    >
-      
-      
+<html lang="de" data-resolution="portrait">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=1080, height=1920" />
+<script src="assets/vendor/gsap.min.js"></script>
+<style>
+@font-face { font-family: "Inter"; src: url("assets/vendor/fonts/Inter-Variable.woff2") format("woff2"); font-weight: 100 900; font-style: normal; font-display: block; }
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 1080px; height: 1920px; overflow: hidden; background: #000; }
+body { font-family: "Inter", "Helvetica Neue", Arial, sans-serif; color: #fff; }
+#root { position: relative; width: 1080px; height: 1920px; background: #000; overflow: hidden; }
+#video-wrap { position: absolute; inset: 0; width: 1080px; height: 1920px; transform-origin: 50% 40%; }
+#a-roll { width: 1080px; height: 1920px; object-fit: cover; display: block; }
 
-      <!--
-        Add your clips here. Example:
-        <div id="title" class="clip" data-start="0" data-duration="5" data-track-index="1"
-             style="font-size: 64px; color: #fff; padding: 40px">
-          Hello World
-        </div>
-      -->
-    </div>
+/* Sicherheitszone: oben 250, unten 350, rechts 120 */
+.card { position: absolute; left: 80px; width: 880px; }
+.lt { top: 1070px; display: flex; align-items: stretch; gap: 22px; height: 150px; }
+.lt-bar { width: 12px; height: 150px; background: #FF1721; border-radius: 6px; transform-origin: top; }
+.lt-text { display: flex; flex-direction: column; justify-content: center; }
+.lt-name { font-size: 62px; font-weight: 800; letter-spacing: -0.02em; line-height: 1.05; text-shadow: 0 2px 12px rgba(0,0,0,.6); }
+.lt-role { font-size: 34px; font-weight: 500; color: #dbe4ff; margin-top: 8px; text-shadow: 0 2px 10px rgba(0,0,0,.6); }
 
-    <script>
-      window.__timelines = window.__timelines || {};
-      const tl = gsap.timeline({ paused: true });
-      // Example: tl.from("#title", { opacity: 0, y: -50, duration: 1 }, 0);
-      window.__timelines["main"] = tl;
-    </script>
-  </body>
+.stat, .bars, .cta { top: 1040px; background: rgba(8, 12, 40, 0.78); border: 2px solid rgba(255,255,255,0.12); border-radius: 36px; padding: 30px 44px; backdrop-filter: blur(14px); }
+.kicker { font-size: 32px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #b9c4ff; }
+.big { font-size: 132px; font-weight: 900; letter-spacing: -0.03em; line-height: 1.05; margin-top: 8px; font-variant-numeric: tabular-nums; }
+.red { color: #FF3B47; }
+.sub { font-size: 38px; font-weight: 500; color: #e6eaff; margin-top: 6px; }
+.src { font-size: 26px; color: #9aa6d9; margin-top: 14px; }
+
+.bars .row { display: grid; grid-template-columns: 230px 1fr 290px; align-items: center; gap: 20px; margin-top: 30px; }
+.bars .lab { font-size: 32px; font-weight: 600; }
+.bars .track { position: relative; height: 44px; background: rgba(255,255,255,0.12); border-radius: 22px; overflow: hidden; }
+.bars .bar { position: absolute; left: 0; top: 0; height: 44px; width: 100%; border-radius: 22px; background: #6f86ff; transform-origin: left center; }
+.bars .red-bg { background: #FF3B47; }
+.bars .val { font-size: 36px; font-weight: 800; text-align: right; font-variant-numeric: tabular-nums; }
+
+.title { position: absolute; left: 80px; top: 1060px; width: 880px; }
+.title-in { display: flex; flex-direction: column; align-items: flex-start; gap: 14px; }
+.pill { display: inline-block; padding: 18px 34px; border-radius: 20px; background: #FF1721; color: #fff; font-size: 52px; font-weight: 800; letter-spacing: -0.01em; line-height: 1.15; }
+.pill.blue { background: #00008F; }
+.pill-sub { display: inline-block; padding: 10px 26px; border-radius: 16px; background: rgba(8,12,40,0.8); font-size: 36px; font-weight: 600; }
+
+.cta { top: 1060px; text-align: center; }
+.cta-line { font-size: 60px; font-weight: 800; line-height: 1.2; }
+.cta-line.small { font-size: 36px; font-weight: 500; color: #dbe4ff; margin-top: 14px; }
+.arrow { display: inline-block; color: #FF3B47; }
+
+/* Untertitel-Schiene */
+.cap { position: absolute; left: 80px; top: 1350px; width: 880px; height: 210px; display: flex; align-items: center; justify-content: center; }
+.capbox { display: inline-block; max-width: 880px; padding: 16px 32px; border-radius: 22px; background: rgba(0,0,0,0.55); font-size: 64px; font-weight: 700; line-height: 1.2; text-align: center; letter-spacing: -0.01em; text-shadow: 0 2px 8px rgba(0,0,0,.5); }
+.w { display: inline-block; }
+.w.em { color: #FFD24D; }
+</style>
+</head>
+<body>
+<div id="root" data-composition-id="main" data-start="0" data-duration="63.95" data-width="1080" data-height="1920">
+  <div id="video-wrap">
+    <video id="a-roll" class="clip" src="assets/cut.mp4" data-start="0" data-duration="63.95" data-track-index="0" muted playsinline></video>
+  </div>
+  <audio id="a-roll-audio" src="assets/cut.mp4" data-start="0" data-duration="63.95" data-track-index="10" data-volume="1"></audio>
+
+  <div id="overlays-host" data-composition-id="overlays" data-composition-src="compositions/overlays.html" data-start="0" data-duration="63.95" data-track-index="3" data-width="1080" data-height="1920"></div>
+  <div id="captions-host" data-composition-id="captions" data-composition-src="compositions/captions.html" data-start="0" data-duration="63.95" data-track-index="5" data-width="1080" data-height="1920"></div>
+</div>
+
+<script>
+const tl = gsap.timeline({ paused: true });
+function cardIn(sel, t) { tl.fromTo(sel, {opacity: 0, y: 40, scale: 0.96}, {opacity: 1, y: 0, scale: 1, duration: 0.45, ease: "power3.out"}, t); }
+function cardOut(sel, t) { tl.to(sel, {opacity: 0, y: -30, duration: 0.3, ease: "power2.in"}, t); }
+function titleIn(sel, t) { tl.fromTo(sel + " .title-in", {opacity: 0, x: -60}, {opacity: 1, x: 0, duration: 0.4, ease: "power3.out"}, t); }
+function titleOut(sel, t) { tl.to(sel + " .title-in", {opacity: 0, x: 40, duration: 0.3, ease: "power2.in"}, t); }
+function countUp(sel, from, to, dur, t, decimals, prefix) {
+  const o = { v: from }; const el = document.querySelector(sel);
+  tl.to(o, { v: to, duration: dur, ease: "power2.out", onUpdate: () => { el.textContent = prefix + o.v.toFixed(decimals).replace(".", ","); } }, t);
+}
+// Punch-in verdeckt die zwei Schnitte
+tl.set("#video-wrap", {scale: 1.07}, 29.04);
+tl.set("#video-wrap", {scale: 1}, 32.63);
+window.__timelines["main"] = tl;
+</script>
+</body>
 </html>

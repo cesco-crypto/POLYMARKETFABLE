@@ -47,3 +47,7 @@ video/projects/*/frames*/
 video/projects/*/node_modules/
 video/projects/*/.hyperframes/
 video/projects/*/*.log
+
+# Render-Master (unkomprimiert, nur lokal)
+video/output/*-master.mp4
+video/projects/*/assets/cut.mp4

@@ -7,17 +7,17 @@ eckigen Klammern ausfüllen. Was leer bleibt, wird mit dem Standardwert
 ## Person / Absender
 | Feld | Wert | Standard, falls leer |
 | --- | --- | --- |
-| Name (Lower-Third) | [Vorname Nachname] | – (wird nachgefragt) |
-| Titel / Rolle (Lower-Third) | [z. B. Finanzberater, Zürich] | – (wird nachgefragt) |
+| Name (Lower-Third) | Francesco Miotti (vorläufig, aus Reel 1) | – (wird nachgefragt) |
+| Titel / Rolle (Lower-Third) | AXA Wechselservice (vorläufig, aus Reel 1) | – (wird nachgefragt) |
 | Instagram-Handle | [@handle] | – (Follow-Overlay wird weggelassen) |
 | Profilbild für Follow-Overlay | [brand/avatar.jpg] | Platzhalter-Avatar |
 
 ## Farben (Hex)
 | Rolle | Wert | Standard, falls leer |
 | --- | --- | --- |
-| Primär (Titel, Balken) | [#RRGGBB] | #22C55E |
-| Akzent (Hervorhebung Schlüsselwörter) | [#RRGGBB] | #FACC15 |
-| Hintergrund Overlays / Karten | [#RRGGBB] | #0B0F1A |
+| Primär (Titel, Balken) | #00008F (AXA-Blau, vorläufig) | #22C55E |
+| Akzent (Hervorhebung Schlüsselwörter) | #FFD24D (Untertitel) · #FF1721 (AXA-Rot, Zahlen/Kicker) | #FACC15 |
+| Hintergrund Overlays / Karten | rgba(8,12,40,0.78) Glas-Karte | #0B0F1A |
 | Text auf dunklem Grund | [#RRGGBB] | #FFFFFF |
 | Text auf hellem Grund | [#RRGGBB] | #0B0F1A |
 | Negativ / Verlust (rote Balken) | [#RRGGBB] | #EF4444 |
